@@ -1,6 +1,3 @@
-"""Network administrator: one account that manages every hospital and its staff, with no patient access; each
-hospital's own administrator stays limited to that hospital."""
-
 import pytest
 from sqlalchemy import select
 
@@ -48,7 +45,6 @@ def test_hospital_admins_cannot_use_network_administration(network):
         bad = client.post("/api/staff", headers=headers, json={"username": "sneaky", "password": "Sneaky1234",
                                                                "full_name": "Sneaky", "role": "network_admin"})
         assert bad.status_code == 422
-    # the network administrator is nobody's staff member
     staff = client.get("/api/staff", headers=login(client, "gvh.admin"), params={"q": "superadmin"}).json()
     assert staff["items"] == []
 
@@ -62,14 +58,12 @@ def test_add_hospital_with_its_own_admin(network):
     hospital = created.json()
     assert hospital["code"] == "LKH" and hospital["abdm_hip_id"] == "SIM_HIP_LKH" and hospital["abdm_hiu_id"] == "SIM_HIU_LKH"
     assert [a["username"] for a in hospital["admins"]] == ["lkh.admin"]
-    # the new hospital's admin runs only their own hospital
     lkh = login(client, "lkh.admin", "Lakeside1234")
     me = client.get("/api/auth/me", headers=lkh).json()
     assert me["hospital_name"] == "Lakeside Hospital" and me["role_code"] == "hospital_admin"
     assert client.get("/api/patients", headers=lkh).json()["items"] == []
     status = client.get("/api/hip/status", headers=lkh).json()
     assert status["hip_id"] == "SIM_HIP_LKH" and status["hiu_id"] == "SIM_HIU_LKH"
-    # duplicates are refused
     again = client.post("/api/network/hospitals", headers=root, json={"name": "Other", "code": "LKH"})
     assert again.status_code == 409
     clash = client.post("/api/network/hospitals", headers=root, json={"name": "Other", "code": "OTH",
@@ -91,12 +85,10 @@ def test_manage_staff_of_any_hospital_and_audit_it(network):
     off = client.patch(f"/api/network/staff/{staff['id']}", headers=root, json={"is_active": False})
     assert off.status_code == 200 and off.json()["is_active"] is False
     assert client.post("/api/auth/login", json={"username": "rmc.admin", "password": "NewAdmin1234"}).status_code == 403
-    # the hospital's own audit log shows what the network administrator did
     with SessionLocal() as db:
         actions = {a.action for a in db.scalars(select(AuditLog).where(AuditLog.hospital_id == rmc))
                    if a.user and a.user.username == "superadmin"}
     assert {"staff.create", "staff.update"} <= actions
-    # network administrators themselves are not managed through the hospital staff API
     root_id = client.get("/api/auth/me", headers=root).json()["id"]
     assert client.patch(f"/api/network/staff/{root_id}", headers=root, json={"is_active": False}).status_code == 404
 

@@ -12,7 +12,6 @@ for module in (auth, hospital, network, staff, doctors, patients, dashboard, con
     app.include_router(module.router, prefix="/api")
 
 class RedactAccessLog(logging.Filter):
-    """Access logs never contain query strings (search terms can be patient names)."""
     def filter(self, record: logging.LogRecord) -> bool:
         if isinstance(record.args, tuple) and len(record.args) >= 3:
             record.args = (*record.args[:2], re.sub(r"\?.*$", "", str(record.args[2])), *record.args[3:])

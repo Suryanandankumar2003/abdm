@@ -1,16 +1,3 @@
-"""Migrate the database to the latest schema, then create roles, the first hospital and its administrator.
-
-Usage:
-    python init_db.py            # safe to run repeatedly; applies new migrations, only adds what is missing
-    python init_db.py --demo     # also adds sample staff, doctors and patients, two more hospitals (each with
-                                 # staff, doctors and a lab catalogue) and shared patients with ABHA addresses
-                                 # such as surya@abdm (see app/demo.py); then scripts/seed_shared_records.py
-                                 # adds shareable records for the HIP/HIU exchange between the hospitals
-
-Schema changes are Alembic migrations in migrations/versions (create one with
-`alembic revision --autogenerate -m "..."` after changing app/models.py, then review it).
-"""
-
 import sys
 from datetime import date
 from pathlib import Path
@@ -27,10 +14,9 @@ from app.models import Doctor, Hospital, LabTest, Patient, Role, User
 from app.security import ROLES, hash_password
 
 DEMO_PASSWORD = "Demo@1234"
-EXAMPLE_ADMIN_PASSWORD = "ChangeMe123"  # the value in .env.example
-BASELINE_REVISION = "0001"  # the schema as created by create_all before migrations existed
+EXAMPLE_ADMIN_PASSWORD = "ChangeMe123"
+BASELINE_REVISION = "0001"
 
-# A starter laboratory catalogue (reference ranges are typical adult values; adjust to the lab's own).
 DEMO_LAB_TESTS = [
     {"code": "CBC", "name": "Complete Blood Count", "category": "Haematology", "sample_type": "Whole blood (EDTA)",
      "parameters": [
@@ -124,8 +110,6 @@ def seed_demo(db: Session, hospital: Hospital) -> None:
 
 
 def seed_network(db: Session, primary: Hospital) -> None:
-    """The demo ABDM network (app/demo.py): two more hospitals with staff, doctors and a lab catalogue, and the demo
-    people registered at each of their hospitals with their one ABHA address. Only adds what is missing."""
     roles = {r.code: r for r in db.scalars(select(Role))}
     hospitals = {demo.PRIMARY: primary}
     for code, profile in demo.HOSPITALS.items():
@@ -178,7 +162,7 @@ def seed_network(db: Session, primary: Hospital) -> None:
                 patient.patient_code = f"{hospital.code}-{patient.id:06d}"
             taken = db.scalar(select(Patient.id).where(Patient.hospital_id == hospital.id, Patient.id != patient.id,
                                                        Patient.abha_address == person["abha_address"]))
-            if not patient.abha_address and not taken:  # as on the patient's ABHA card; verified later with ABDM
+            if not patient.abha_address and not taken:
                 patient.abha_address, patient.abha_number = person["abha_address"], person["abha_number"]
     db.commit()
     print("Demo network ready:")
@@ -191,16 +175,11 @@ def seed_network(db: Session, primary: Hospital) -> None:
 
 
 def migrate(bind: Engine = engine) -> None:
-    """Bring the database to the latest migration. A database created before migrations existed (tables but no
-    alembic_version) is first marked as being at the baseline, so only the newer migrations run on it."""
     config = Config(str(Path(__file__).resolve().parent / "alembic.ini"))
     config.attributes["configure_logger"] = False
     sqlite = bind.dialect.name == "sqlite"
     with bind.connect() as connection:
         if sqlite:
-            # Batch migrations rebuild a table (copy, drop, rename). With foreign keys enforced SQLite refuses to
-            # drop a table other rows point at, so enforcement is off during migrations (it can only be switched
-            # outside a transaction); rows keep their ids, and the check below proves every reference is intact.
             connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
             connection.commit()
         try:

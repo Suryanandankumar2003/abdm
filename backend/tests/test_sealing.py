@@ -1,5 +1,3 @@
-"""Encryption at rest of retrieved records: separate sealing key, key ids, rotation and re-sealing."""
-
 import pytest
 from sqlalchemy import select
 
@@ -26,7 +24,7 @@ def test_legacy_mode_unchanged(sealing):
     sealed = hiu.seal("bundle")
     assert not sealed.startswith("v2.")
     assert hiu.unseal(sealed) == "bundle"
-    assert not hiu.needs_reseal(sealed)  # nothing to move to without a sealing key
+    assert not hiu.needs_reseal(sealed)
 
 
 def test_sealing_key_is_independent_of_jwt_secret(sealing, monkeypatch):
@@ -34,10 +32,10 @@ def test_sealing_key_is_independent_of_jwt_secret(sealing, monkeypatch):
     sealing(KEY_A)
     sealed = hiu.seal("new record")
     assert sealed.startswith(f"v2.{hiu.active_key_id()}.")
-    assert hiu.unseal(legacy) == "old record"  # data sealed before the key was set stays readable
+    assert hiu.unseal(legacy) == "old record"
     assert hiu.needs_reseal(legacy) and not hiu.needs_reseal(sealed)
     monkeypatch.setattr(settings, "jwt_secret", "a-rotated-jwt-secret-that-is-long-enough-xyz")
-    assert hiu.unseal(sealed) == "new record"  # rotating JWT_SECRET no longer affects new data
+    assert hiu.unseal(sealed) == "new record"
 
 
 def test_rotation_needs_the_old_key(sealing):
@@ -54,16 +52,16 @@ def test_rotation_needs_the_old_key(sealing):
 def test_reseal_moves_rows_to_active_key(client, sealing):
     with SessionLocal() as db:
         user = db.scalar(select(User).where(User.username == "dr.mehta"))
-        user.mfa_secret = hiu.seal("JBSWY3DPEHPK3PXP")  # a two-step sign-in secret, sealed with the legacy key
+        user.mfa_secret = hiu.seal("JBSWY3DPEHPK3PXP")
         db.commit()
         sealing(KEY_A)
         assert reseal(db, dry_run=True)["users"] == 1
-        assert not db.get(User, user.id).mfa_secret.startswith("v2.")  # dry run changed nothing
+        assert not db.get(User, user.id).mfa_secret.startswith("v2.")
         assert reseal(db)["users"] == 1
-        sealing(KEY_B, old=KEY_A)  # rotate
+        sealing(KEY_B, old=KEY_A)
         assert reseal(db)["users"] == 1
-        assert reseal(db)["users"] == 0  # already on the active key
-        sealing(KEY_B)  # the old key can now be dropped
+        assert reseal(db)["users"] == 0
+        sealing(KEY_B)
         secret = db.get(User, user.id).mfa_secret
         assert secret.startswith(f"v2.{hiu.active_key_id()}.")
         assert hiu.unseal(secret) == "JBSWY3DPEHPK3PXP"

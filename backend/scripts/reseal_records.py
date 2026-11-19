@@ -1,33 +1,20 @@
-"""Re-encrypt every sealed value with the active RECORD_SEALING_KEY.
-
-Use it once after first setting RECORD_SEALING_KEY (moves data off the legacy JWT_SECRET-derived key), and after
-each rotation: put the new key in RECORD_SEALING_KEY, the previous one in RECORD_SEALING_OLD_KEYS, run this script,
-then remove the old key. Each row is checked to decrypt to the same text before it is saved; the whole run is one
-transaction, so a failure changes nothing.
-
-Usage (from backend/, with the venv active):
-    python scripts/reseal_records.py --dry-run   # report what would change
-    python scripts/reseal_records.py
-"""
-
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import select
 
-from app import hiu  # noqa: E402
-from app.config import settings  # noqa: E402
-from app.database import SessionLocal  # noqa: E402
-from app.models import HiuDataRequest, RetrievedRecord, User  # noqa: E402
+from app import hiu
+from app.config import settings
+from app.database import SessionLocal
+from app.models import HiuDataRequest, RetrievedRecord, User
 
 SEALED_COLUMNS = [(RetrievedRecord, "content"), (HiuDataRequest, "key_material"),
-                  (User, "mfa_secret")]  # two-step sign-in secrets
+                  (User, "mfa_secret")]
 
 
 def reseal(db, dry_run: bool = False) -> dict[str, int]:
-    """Re-seal every value not yet under the active key; returns the number changed per table."""
     if not settings.record_sealing_key:
         raise SystemExit("Set RECORD_SEALING_KEY in backend/.env first")
     changed: dict[str, int] = {}

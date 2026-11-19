@@ -1,14 +1,3 @@
-"""ABDM Health Information Provider (HIP): this hospital shares its validated FHIR records through ABDM.
-
-ABDM itself (gateway, consent manager, ABHA registry) is simulated in-process, so each step is a direct function call:
-1. verify_abha(): ABDM checks the patient's ABHA address against their demographics and issues a link token;
-2. link_care_contexts(): the patient's validated FHIR records (care contexts) are linked to that ABHA address;
-3. consent_notify(): a consent the patient granted (or revoked) is checked against this HIP's records and stored;
-4. share(): records covered by an active consent are encrypted for the requesting HIU, with a status for each.
-Encryption follows ABDM's scheme: X25519 (ECDH) shared secret, HKDF-SHA256 key and AES-256-GCM, with salt and IV taken
-from the XOR of both sides' nonces.
-"""
-
 import base64
 import hashlib
 import json
@@ -32,37 +21,32 @@ MODE = "simulation"
 HI_TYPES = {"OPConsultRecord": "OPConsultation", "PrescriptionRecord": "Prescription",
             "DiagnosticReportRecord": "DiagnosticReport", "DischargeSummaryRecord": "DischargeSummary",
             "ImmunizationRecord": "ImmunizationRecord", "WellnessRecord": "WellnessRecord",
-            "HealthDocumentRecord": "HealthDocumentRecord"}  # FHIR record type -> ABDM health information type
+            "HealthDocumentRecord": "HealthDocumentRecord"}
 HI_LABELS = {"OPConsultation": "OP consultation", "Prescription": "Prescription", "DiagnosticReport": "Lab report",
              "DischargeSummary": "Discharge summary", "ImmunizationRecord": "Immunization",
              "WellnessRecord": "Wellness record", "HealthDocumentRecord": "Health document"}
-registry: dict[str, dict] = demo.abha_accounts()  # simulated ABHA registry: address -> name, gender, yearOfBirth, abhaNumber
+registry: dict[str, dict] = demo.abha_accounts()
 
 
 class HipError(Exception):
-    """A request the HIP refuses; the message is shown to staff."""
+    pass
 
 
 def sim_reset() -> None:
-    """Forget simulated ABHA accounts created at run time (the demo people always have one)."""
     registry.clear()
     registry.update(demo.abha_accounts())
 
-
-# ---------- encryption ----------
 
 def b64(data: bytes) -> str:
     return base64.b64encode(data).decode()
 
 
 def new_keys() -> dict:
-    """A fresh key pair and 32-byte nonce for one data transfer; the private key never leaves memory."""
     private = X25519PrivateKey.generate()
     return {"private": private, "public": b64(private.public_key().public_bytes_raw()), "nonce": b64(secrets.token_bytes(32))}
 
 
 def session_cipher(keys: dict, peer_public: str, peer_nonce: str) -> tuple[AESGCM, bytes]:
-    """Both sides derive the same AES key and IV from the shared secret and the XOR of their nonces."""
     shared = keys["private"].exchange(X25519PublicKey.from_public_bytes(base64.b64decode(peer_public)))
     xor = bytes(a ^ b for a, b in zip(base64.b64decode(keys["nonce"]), base64.b64decode(peer_nonce)))
     return AESGCM(HKDF(algorithm=hashes.SHA256(), length=32, salt=xor[:20], info=None).derive(shared)), xor[-12:]
@@ -79,7 +63,6 @@ def decrypt(data: str, keys: dict, peer_public: str, peer_nonce: str) -> str:
 
 
 def hip_id(hospital: Hospital) -> str:
-    """The hospital's HIP service ID: its own, else the server-wide default."""
     return hospital.abdm_hip_id or settings.abdm_hip_id or "SIM_HIP_001"
 
 
@@ -88,22 +71,17 @@ def hiu_id(hospital: Hospital) -> str:
 
 
 def hospital_names(db: Session, role: str) -> dict[str, str]:
-    """ABDM HIP or HIU ID -> name of the hospital on this server that uses it."""
     return {(hip_id if role == "hip" else hiu_id)(h): h.name for h in db.scalars(select(Hospital).order_by(Hospital.id.desc()))}
 
 
 def parse_time(value: str | None) -> datetime | None:
-    """An ISO date-time as ABDM sends it -> naive UTC datetime."""
     if not value:
         return None
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed.astimezone(timezone.utc).replace(tzinfo=None) if parsed.tzinfo else parsed
 
 
-# ---------- 1-2. ABHA verification and care contexts ----------
-
 def sync_care_contexts(db: Session, patient: Patient) -> list[CareContext]:
-    """One care context per validated FHIR record of the patient (only validated records can be shared)."""
     existing = {c.fhir_record_id for c in db.scalars(select(CareContext).where(CareContext.patient_id == patient.id))}
     code = db.get(Hospital, patient.hospital_id).code
     for rec in db.scalars(select(FhirRecord).where(FhirRecord.patient_id == patient.id)):
@@ -117,7 +95,6 @@ def sync_care_contexts(db: Session, patient: Patient) -> list[CareContext]:
 
 
 def verify_abha(db: Session, user: User, patient: Patient) -> HipPatientLink:
-    """ABDM confirms the ABHA address against the patient's name, gender and year of birth and issues a link token."""
     if not patient.abha_address:
         raise HipError("Enter the patient's ABHA address first")
     if patient.gender not in ("M", "F", "O"):
@@ -147,7 +124,6 @@ def verify_abha(db: Session, user: User, patient: Patient) -> HipPatientLink:
 
 
 def link_care_contexts(db: Session, user: User, patient: Patient, contexts: list[CareContext]) -> str:
-    """Link care contexts to the verified ABHA address with the link token (HIP-initiated linking)."""
     link = db.scalar(select(HipPatientLink).where(HipPatientLink.patient_id == patient.id))
     if link is None or link.status != "verified" or not link.link_token:
         raise HipError("Verify the patient's ABHA address with ABDM (link token) first")
@@ -160,10 +136,7 @@ def link_care_contexts(db: Session, user: User, patient: Patient, contexts: list
     return f"{len(contexts)} care context(s) linked to {link.abha_address}"
 
 
-# ---------- 3. consent ----------
-
 def consent_problem(db: Session, hospital: Hospital, detail: dict) -> tuple[str | None, Patient | None]:
-    """Why a GRANTED consent artefact cannot be accepted by this HIP (None if it can), and whose records it covers."""
     if detail["hip"]["id"] != hip_id(hospital):
         return "Consent is for a different HIP", None
     refs, address = detail.get("careContexts") or [], detail["patient"]["id"].lower()
@@ -185,8 +158,6 @@ def consent_problem(db: Session, hospital: Hospital, detail: dict) -> tuple[str 
 
 
 def consent_notify(db: Session, hospital: Hospital, consent_id: str, status: str, detail: dict | None = None) -> HipConsent:
-    """The consent manager tells this HIP about a consent: GRANTED (checked, then stored) or REVOKED / EXPIRED / DENIED,
-    which stops sharing at once."""
     consent = db.scalar(select(HipConsent).where(HipConsent.hospital_id == hospital.id, HipConsent.consent_id == consent_id))
     if status != "GRANTED":
         if consent:
@@ -204,11 +175,7 @@ def consent_notify(db: Session, hospital: Hospital, consent_id: str, status: str
     return consent
 
 
-# ---------- 4. sharing ----------
-
 def share(db: Session, hospital: Hospital, consent_id: str, date_from: str, date_to: str, hiu_keys: dict) -> dict:
-    """An HIU asks for the records of a consent, sending its public key and nonce (hiu_keys). Returns {"error"} when
-    refused, else the encrypted entries, this HIP's key material and a status per care context."""
     consent = db.scalar(select(HipConsent).where(HipConsent.hospital_id == hospital.id, HipConsent.consent_id == consent_id))
     start, end, problem = parse_time(date_from), parse_time(date_to), None
     if consent is None or consent.status != "GRANTED":
@@ -227,7 +194,6 @@ def share(db: Session, hospital: Hospital, consent_id: str, date_from: str, date
     if problem:
         return {"error": f"Request refused: {problem}", "entries": [], "statusResponses": []}
 
-    # Only care contexts in the consent, of consented types, dated inside the request and still validated.
     own, entries, statuses = new_keys(), [], []
     refs = [r["careContextReference"] for r in consent.care_contexts]
     for c in db.scalars(select(CareContext).where(CareContext.hospital_id == hospital.id, CareContext.reference.in_(refs))):

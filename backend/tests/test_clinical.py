@@ -22,10 +22,8 @@ def lab_test_id(client, headers, code):
 def test_complete_clinical_workflow(client):
     reception, doctor, lab, rao = (login(client, u) for u in ("reception", "dr.mehta", "labtech", "dr.rao"))
 
-    # 1. Register a patient
     patient = register(client, reception).json()
 
-    # 2. Create a consultation with vitals and clinical notes
     consult = start_consultation(client, doctor, patient["id"])
     assert consult["status"] == "draft" and consult["doctor"]["full_name"] == "Dr. Anil Mehta"
     saved = client.put(f"/api/consultations/{consult['id']}", headers=doctor, json={
@@ -36,26 +34,23 @@ def test_complete_clinical_workflow(client):
         "treatment_plan": "Start metformin, diet advice",
         "follow_up_instructions": "Review with reports",
         "follow_up_date": "2026-12-01",
-        # 3. Add a diagnosis
         "diagnoses": [{"display": "Type 2 diabetes mellitus", "code": "e11.9", "verification_status": "provisional"}],
     })
     assert saved.status_code == 200, saved.text
     assert saved.json()["conditions"][0]["code"] == "E11.9"
     assert saved.json()["vitals"]["pulse"] == 88
 
-    # 4. Create a prescription with several medicines, then review and approve it
     rx = client.post("/api/prescriptions", headers=doctor, json={"encounter_id": consult["id"], "items": MEDICINES})
     assert rx.status_code == 201, rx.text
     rx_id = rx.json()["id"]
     assert len(rx.json()["items"]) == 2 and rx.json()["status"] == "draft"
-    assert client.post(f"/api/prescriptions/{rx_id}/approve", headers=doctor).status_code == 409  # must submit first
+    assert client.post(f"/api/prescriptions/{rx_id}/approve", headers=doctor).status_code == 409
     assert client.post(f"/api/prescriptions/{rx_id}/submit", headers=doctor).json()["status"] == "pending_approval"
     assert client.put(f"/api/prescriptions/{rx_id}", headers=doctor, json={"items": MEDICINES}).status_code == 409
-    assert client.post(f"/api/prescriptions/{rx_id}/approve", headers=rao).status_code == 403  # not the prescriber
+    assert client.post(f"/api/prescriptions/{rx_id}/approve", headers=rao).status_code == 403
     approved_rx = client.post(f"/api/prescriptions/{rx_id}/approve", headers=doctor).json()
     assert approved_rx["status"] == "approved" and approved_rx["approved_by_name"] == "Dr. Anil Mehta"
 
-    # 5. Order laboratory tests
     orders = client.post("/api/lab/orders", headers=doctor, json={
         "encounter_id": consult["id"], "test_ids": [lab_test_id(client, doctor, "FBS"), lab_test_id(client, doctor, "CBC")],
         "priority": "urgent", "clinical_notes": "Suspected diabetes"})
@@ -63,16 +58,14 @@ def test_complete_clinical_workflow(client):
     cbc = next(o for o in orders.json() if o["test"]["code"] == "CBC")
     assert cbc["status"] == "ordered" and cbc["sample_status"] == "pending"
 
-    # Sample collection
     assert client.put(f"/api/lab/orders/{cbc['id']}/report", headers=lab, json={"results": []}).status_code == 409
     sample = client.post(f"/api/lab/orders/{cbc['id']}/sample", headers=lab, json={"sample_barcode": "B-1001"}).json()
     assert sample["status"] == "sample_collected" and sample["sample_collected_by_name"] == "Rahul Verma"
 
-    # 6. Enter results (partial draft, then complete); abnormal values are flagged
     partial = client.put(f"/api/lab/orders/{cbc['id']}/report", headers=lab,
                          json={"results": [{"code": "HB", "value": "10.5"}]})
     assert partial.json()["report"]["status"] == "draft"
-    assert client.post(f"/api/lab/orders/{cbc['id']}/report/submit", headers=lab).status_code == 422  # incomplete
+    assert client.post(f"/api/lab/orders/{cbc['id']}/report/submit", headers=lab).status_code == 422
     bad_code = client.put(f"/api/lab/orders/{cbc['id']}/report", headers=lab, json={"results": [{"code": "XYZ", "value": "1"}]})
     assert bad_code.status_code == 422
     full = client.put(f"/api/lab/orders/{cbc['id']}/report", headers=lab, json={
@@ -82,9 +75,8 @@ def test_complete_clinical_workflow(client):
     assert flags == {"HB": "L", "WBC": "N", "PLT": "H"}
     assert full["report"]["results"][0]["unit"] == "g/dL" and full["status"] == "in_progress"
 
-    # 7. Submit, approve (by a doctor who did not enter the results) and view the final report
     assert client.post(f"/api/lab/orders/{cbc['id']}/report/submit", headers=lab).json()["report"]["status"] == "pending_approval"
-    assert client.post(f"/api/lab/orders/{cbc['id']}/report/approve", headers=lab).status_code == 403  # no lab:approve
+    assert client.post(f"/api/lab/orders/{cbc['id']}/report/approve", headers=lab).status_code == 403
     rejected = client.post(f"/api/lab/orders/{cbc['id']}/report/reject", headers=rao, json={"reason": "Recheck platelets"})
     assert rejected.json()["report"]["status"] == "rejected"
     client.put(f"/api/lab/orders/{cbc['id']}/report", headers=lab, json={
@@ -96,20 +88,17 @@ def test_complete_clinical_workflow(client):
     assert final["report"]["approved_by_name"] == "Dr. Sunita Rao"
     assert client.get(f"/api/lab/orders/{cbc['id']}", headers=doctor).json()["report"]["conclusion"].startswith("Mild")
 
-    # Finalize the consultation; it is then locked
     finalized = client.post(f"/api/consultations/{consult['id']}/finalize", headers=doctor).json()
     assert finalized["status"] == "approved"
     assert client.put(f"/api/consultations/{consult['id']}", headers=doctor, json={"doctor_notes": "x"}).status_code == 409
 
-    # 8. Patient clinical history shows only finalized/approved records
     history = client.get(f"/api/patients/{patient['id']}/history", headers=doctor).json()
     assert [c["display"] for c in history["active_conditions"]] == ["Type 2 diabetes mellitus"]
     assert len(history["consultations"]) == 1 and len(history["prescriptions"]) == 1
-    assert [o["test"]["code"] for o in history["lab_orders"]] == ["CBC"]  # FBS still pending
+    assert [o["test"]["code"] for o in history["lab_orders"]] == ["CBC"]
 
-    # FHIR documents for approved records
     hims = login(client, "hims")
-    generate = lambda source_type, source_id: client.post("/api/fhir/records", headers=hims, json={  # noqa: E731
+    generate = lambda source_type, source_id: client.post("/api/fhir/records", headers=hims, json={
         "source_type": source_type, "source_id": source_id}).json()["bundle"]
     bundle = generate("consultation", consult["id"])
     types = [e["resource"]["resourceType"] for e in bundle["entry"]]
@@ -120,7 +109,7 @@ def test_complete_clinical_workflow(client):
     bp = next(e["resource"] for e in bundle["entry"] if e["resource"].get("code", {}).get("text") == "Blood pressure")
     assert [c["valueQuantity"]["value"] for c in bp["component"]] == [138, 86]
     patient_resource = next(e["resource"] for e in bundle["entry"] if e["resource"]["resourceType"] == "Patient")
-    assert len(patient_resource["identifier"]) == 1  # unverified ABHA is not exported
+    assert len(patient_resource["identifier"]) == 1
 
     report_bundle = generate("lab_order", cbc["id"])
     report = next(e["resource"] for e in report_bundle["entry"] if e["resource"]["resourceType"] == "DiagnosticReport")
@@ -139,18 +128,18 @@ def test_consultation_rules(client):
     assert client.post("/api/consultations", json={"patient_id": patient_id}, headers=reception).status_code == 403
     no_profile = client.post("/api/consultations", json={"patient_id": patient_id}, headers=admin)
     assert no_profile.status_code == 403 and "doctor profile" in no_profile.json()["detail"]
-    assert client.get("/api/consultations", headers=reception).status_code == 403  # receptionists see no clinical data
+    assert client.get("/api/consultations", headers=reception).status_code == 403
 
     consult = start_consultation(client, doctor, patient_id)
     assert client.put(f"/api/consultations/{consult['id']}", headers=rao, json={"doctor_notes": "x"}).status_code == 403
-    assert client.post(f"/api/consultations/{consult['id']}/finalize", headers=doctor).status_code == 422  # no complaint
+    assert client.post(f"/api/consultations/{consult['id']}/finalize", headers=doctor).status_code == 422
     vitals = client.put(f"/api/consultations/{consult['id']}", headers=doctor, json={"vitals": {"pulse": 900}})
     assert vitals.status_code == 422
     bad_icd = client.put(f"/api/consultations/{consult['id']}", headers=doctor,
                          json={"diagnoses": [{"display": "Fever", "code": "fever"}]})
     assert bad_icd.status_code == 422
     assert client.post("/api/fhir/records", headers=login(client, "hims"),
-                       json={"source_type": "consultation", "source_id": consult["id"]}).status_code == 409  # draft
+                       json={"source_type": "consultation", "source_id": consult["id"]}).status_code == 409
 
     cancelled = client.post(f"/api/consultations/{consult['id']}/cancel", headers=doctor, json={"reason": "Wrong patient"})
     assert cancelled.json()["status"] == "cancelled"
@@ -212,7 +201,6 @@ def test_lab_catalogue_and_sample_rejection(client, admin):
     recollected = client.post(f"/api/lab/orders/{order['id']}/sample", headers=lab, json={}).json()
     assert recollected["sample_status"] == "collected" and recollected["sample_barcode"].startswith("S")
 
-    # Text results keep the technician's flag
     urine = client.post("/api/lab/orders", headers=doctor, json={
         "encounter_id": consult["id"], "test_ids": [lab_test_id(client, doctor, "URINE-RM")]}).json()[0]
     client.post(f"/api/lab/orders/{urine['id']}/sample", headers=lab, json={})
@@ -220,7 +208,6 @@ def test_lab_catalogue_and_sample_rejection(client, admin):
         {"code": "PROT", "value": "Trace", "interpretation": "A"}, {"code": "SUGAR", "value": "Negative", "interpretation": "N"}]})
     assert [r["interpretation"] for r in saved.json()["report"]["results"]] == ["A", "N"]
 
-    # Deactivated tests cannot be ordered; cancelled orders cannot be worked on
     client.put(f"/api/lab/tests/{created.json()['id']}", headers=lab, json={**test, "is_active": False})
     again = client.post("/api/lab/orders", headers=doctor, json={"encounter_id": consult["id"], "test_ids": [created.json()["id"]]})
     assert again.status_code == 409
@@ -232,7 +219,6 @@ def test_lab_catalogue_and_sample_rejection(client, admin):
 
 
 def test_lab_report_requires_second_person(client, admin):
-    """Whoever entered the results cannot approve them; approval also needs a doctor profile."""
     doctor, lab = login(client, "dr.mehta"), login(client, "labtech")
     patient_id = client.get("/api/patients", headers=doctor).json()["items"][0]["id"]
     consult = start_consultation(client, doctor, patient_id)

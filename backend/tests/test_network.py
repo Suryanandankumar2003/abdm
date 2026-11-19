@@ -1,10 +1,3 @@
-"""Several hospitals on one server (init_db.seed_network): each has its own ABDM IDs, and records flow between them.
-
-The demo patient Surya Prakash has one ABHA address, surya@abdm, at every hospital. A record Green Valley links to it
-is requested by the primary hospital (as HIU), consented to in the simulated ABHA app, checked by Green Valley's HIP
-code and sent, encrypted, to the primary hospital.
-"""
-
 from datetime import date
 
 import pytest
@@ -34,7 +27,6 @@ def patient(client, headers, query):
 
 
 def verify_and_link(client, hims, p):
-    """Verify the ABHA address with simulated ABDM (the demo accounts exist already) and link all care contexts."""
     assert client.post(f"/api/hip/patients/{p['id']}/link-token", headers=hims).json()["status"] == "verified"
     overview = client.get(f"/api/hip/patients/{p['id']}", headers=hims).json()
     if ids := [c["id"] for c in overview["care_contexts"]]:
@@ -42,7 +34,6 @@ def verify_and_link(client, hims, p):
 
 
 def shareable_record_at_green_valley(client):
-    """An approved, validated prescription for surya@abdm at Green Valley, verified and linked through ABDM."""
     doctor, hims = login(client, "gvh.shetty"), login(client, "gvh.hims")
     surya = patient(client, hims, "Surya")
     assert surya["abha_address"] == "surya@abdm" and surya["patient_code"].startswith("GVH-")
@@ -51,7 +42,7 @@ def shareable_record_at_green_valley(client):
     client.post(f"/api/prescriptions/{rx['id']}/submit", headers=doctor)
     client.post(f"/api/prescriptions/{rx['id']}/approve", headers=doctor)
     record = client.post("/api/fhir/records", headers=hims, json={"source_type": "prescription", "source_id": rx["id"]}).json()
-    with SessionLocal() as db:  # HL7 validation itself is covered by the FHIR tests
+    with SessionLocal() as db:
         db.get(FhirRecord, record["id"]).validation_status = "valid"
         db.commit()
     verify_and_link(client, hims, surya)
@@ -66,10 +57,10 @@ def test_each_hospital_has_its_own_abdm_identity(network):
     hospitals = client.get("/api/hip/network", headers=login(client, "gvh.hims")).json()["hospitals"]
     assert [(h["code"], h["hip_id"], h["this_hospital"]) for h in hospitals] == [
         ("TST", "SIM_HIP_TST", False), ("GVH", "SIM_HIP_GVH", True), ("RMC", "SIM_HIP_RMC", False)]
-    for username in staff:  # one ABHA address per person, the same at each hospital where they are registered
+    for username in staff:
         assert patient(client, login(client, username), "Surya")["abha_address"] == "surya@abdm"
     clash = client.put("/api/hospital", headers=login(client, "gvh.admin"), json={"abdm_hip_id": "SIM_HIP_RMC"})
-    assert clash.status_code == 409  # IDs are unique across hospitals
+    assert clash.status_code == 409
 
 
 def test_records_flow_from_one_hospital_to_another(network):
@@ -77,7 +68,7 @@ def test_records_flow_from_one_hospital_to_another(network):
     shareable_record_at_green_valley(client)
     doctor, hims = login(client, "dr.mehta"), login(client, "hims")
     surya = patient(client, hims, "Surya")
-    verify_and_link(client, hims, surya)  # the requesting hospital needs a verified ABHA address
+    verify_and_link(client, hims, surya)
     request = client.post("/api/hiu/requests", headers=doctor, json={
         "patient_id": surya["id"], "purpose_code": "CAREMGT", "hi_types": ["Prescription", "DiagnosticReport"],
         "date_from": "2024-01-01", "date_to": TODAY}).json()
@@ -92,14 +83,14 @@ def test_records_flow_from_one_hospital_to_another(network):
     assert [(r["source_hip_id"], r["source_name"], r["category"], r["checksum_ok"]) for r in records] == [
         ("SIM_HIP_GVH", "Green Valley Multispeciality Hospital", "Prescription", True)]
 
-    gvh = login(client, "gvh.hims")  # Green Valley's HIP side checked the consent before sending
+    gvh = login(client, "gvh.hims")
     consent = client.get("/api/hip/consents", headers=gvh).json()["items"][0]
     assert consent["status"] == "GRANTED" and consent["abha_address"] == "surya@abdm"
     assert consent["hiu_id"] == "SIM_HIU_TST" and consent["hiu_name"] == "Test Hospital"
-    assert client.get("/api/hip/consents", headers=login(client, "rmc.hims")).json()["items"] == []  # held nothing
+    assert client.get("/api/hip/consents", headers=login(client, "rmc.hims")).json()["items"] == []
 
     revoked = client.post(f"/api/hiu/simulate/requests/{request['id']}/revoke", headers=doctor).json()
-    assert revoked["status"] == "revoked"  # revoking reaches the HIP too, and the received copy is erased
+    assert revoked["status"] == "revoked"
     assert client.get("/api/hip/consents", headers=gvh).json()["items"][0]["status"] == "REVOKED"
     assert client.get(f"/api/hiu/patients/{surya['id']}/records", headers=doctor).json()["records"] == []
 
@@ -107,7 +98,7 @@ def test_records_flow_from_one_hospital_to_another(network):
 def test_grant_needs_records_at_another_hospital(network):
     client = network
     doctor, hims = login(client, "dr.mehta"), login(client, "hims")
-    arjun = patient(client, hims, "Arjun")  # registered only at the primary hospital
+    arjun = patient(client, hims, "Arjun")
     verify_and_link(client, hims, arjun)
     request = client.post("/api/hiu/requests", headers=doctor, json={
         "patient_id": arjun["id"], "purpose_code": "CAREMGT", "hi_types": ["Prescription"],

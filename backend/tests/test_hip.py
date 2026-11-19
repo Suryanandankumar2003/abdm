@@ -1,5 +1,3 @@
-"""ABDM HIP with simulated ABDM: ABHA verification, care contexts and linking, consent checks and encrypted sharing."""
-
 import base64
 import json
 import uuid
@@ -21,7 +19,6 @@ def clean_hip():
 
 
 def shareable_prescription(client, abha_address=None):
-    """Ramesh Kumar with an approved prescription whose FHIR record is HIP-eligible (validated)."""
     doctor, hims = login(client, "dr.mehta"), login(client, "hims")
     patient = client.get("/api/patients?q=ramesh", headers=hims).json()["items"][0]
     if abha_address:
@@ -31,7 +28,7 @@ def shareable_prescription(client, abha_address=None):
     client.post(f"/api/prescriptions/{rx['id']}/submit", headers=doctor)
     client.post(f"/api/prescriptions/{rx['id']}/approve", headers=doctor)
     record = client.post("/api/fhir/records", headers=hims, json={"source_type": "prescription", "source_id": rx["id"]}).json()
-    with SessionLocal() as db:  # HL7 validation itself is covered by the FHIR tests
+    with SessionLocal() as db:
         db.get(FhirRecord, record["id"]).validation_status = "valid"
         db.commit()
     return patient, record, hims
@@ -62,9 +59,9 @@ def test_hip_status(client):
 def test_abha_verification(client):
     patient, _, hims = shareable_prescription(client, abha_address="ramesh.k@sbx")
     url = f"/api/hip/patients/{patient['id']}"
-    assert client.get(f"/api/patients/{patient['id']}", headers=hims).json()["abha_verified"] is False  # entered != verified
+    assert client.get(f"/api/patients/{patient['id']}", headers=hims).json()["abha_verified"] is False
 
-    assert client.post(f"{url}/link-token", headers=hims).json()["status"] == "failed"  # unknown to ABDM
+    assert client.post(f"{url}/link-token", headers=hims).json()["status"] == "failed"
     register_abha(client, hims, patient, "ramesh.k@sbx", year_of_birth=1990)
     failed = client.post(f"{url}/link-token", headers=hims).json()
     assert failed["status"] == "failed" and "do not match" in failed["message"]
@@ -75,7 +72,7 @@ def test_abha_verification(client):
     overview = client.get(url, headers=hims).json()
     with SessionLocal() as db:
         token = db.query(HipPatientLink).filter_by(patient_id=patient["id"]).one().link_token
-    assert overview["link"]["status"] == "verified" and token and token not in json.dumps(overview)  # never returned
+    assert overview["link"]["status"] == "verified" and token and token not in json.dumps(overview)
     registered = client.get(f"/api/patients/{patient['id']}", headers=hims).json()
     assert registered["abha_verified"] is True and registered["abha_verification_method"] == "abdm_link_token"
     assert registered["abha_number"] == "91123456789012"
@@ -90,7 +87,7 @@ def test_care_context_creation_and_linking(client):
     assert context["link_status"] == "not_linked" and context["fhir_record_id"] == record["id"]
 
     blocked = client.post(f"{url}/care-contexts/link", headers=hims, json={"care_context_ids": [context["id"]]})
-    assert blocked.status_code == 422 and "link token" in blocked.json()["detail"]  # not without ABHA verification
+    assert blocked.status_code == 422 and "link token" in blocked.json()["detail"]
 
     register_abha(client, hims, patient, "ramesh.k@sbx")
     linked = link_via_token(client, hims, patient)["care_contexts"][0]
@@ -117,7 +114,7 @@ def test_consent_verification(client):
     stored = client.get("/api/hip/consents", headers=hims).json()["items"][0]
     assert stored["status"] == "GRANTED" and stored["hi_types"] == ["Prescription"] and stored["hiu_id"] == "SIM_HIU_001"
 
-    def notify(**changes):  # what the consent manager sends, with one thing changed
+    def notify(**changes):
         detail = {"hip": {"id": "SIM_HIP_001"}, "hiu": {"id": "SIM_HIU_001"}, "patient": {"id": "ramesh.k@sbx"},
                   "careContexts": [{"patientReference": patient["patient_code"], "careContextReference": context["reference"]}],
                   "purpose": {"code": "CAREMGT"}, "hiTypes": ["Prescription"], "permission": {
@@ -150,18 +147,18 @@ def test_health_information_sharing(client):
 
     result = request()
     assert result["error"] is None and result["session_status"] == "TRANSFERRED"
-    [received] = result["received_by_hiu"]  # the HIU decrypted it with its own keys
+    [received] = result["received_by_hiu"]
     assert received == {"careContextReference": context["reference"], "checksum_ok": True, "profile": "PrescriptionRecord",
                         "resources": received["resources"]}
     assert result["status_responses"] == [{"careContextReference": context["reference"], "hiStatus": "DELIVERED",
                                            "description": "Done"}]
 
-    early = request(date_to="2020-12-31")  # record outside the requested dates: nothing sent, the HIU is told why
+    early = request(date_to="2020-12-31")
     assert early["received_by_hiu"] == [] and early["session_status"] == "FAILED"
     assert early["status_responses"][0]["hiStatus"] == "ERRORED"
-    assert "outside the consented range" in request(date_from="2010-01-01")["error"]  # wider than the consent
+    assert "outside the consented range" in request(date_from="2010-01-01")["error"]
     consent(client, hims, patient, status="REVOKED", consent_id=granted["consent_id"])
-    assert "not active" in request()["error"]  # revoked: sharing stops at once
+    assert "not active" in request()["error"]
 
 
 def test_invalid_key_material_is_refused(client):
@@ -177,5 +174,5 @@ def test_encryption_round_trip():
     hip_keys, hiu_keys, stranger = hip.new_keys(), hip.new_keys(), hip.new_keys()
     secret = hip.encrypt("Bundle", hip_keys, hiu_keys["public"], hiu_keys["nonce"])
     assert hip.decrypt(secret, hiu_keys, hip_keys["public"], hip_keys["nonce"]) == "Bundle"
-    with pytest.raises(Exception):  # only the HIU holding the matching private key can read it
+    with pytest.raises(Exception):
         hip.decrypt(secret, stranger, hip_keys["public"], hip_keys["nonce"])

@@ -1,5 +1,3 @@
-"""Phase 6: AI assistant (scoping, traceability, safety) and security hardening."""
-
 import logging
 
 import pytest
@@ -14,7 +12,6 @@ PROMPTS = []
 
 @pytest.fixture(autouse=True)
 def fake_ai(monkeypatch):
-    """Answers cite one real record, one unknown record and one invented date, to exercise the checks."""
     PROMPTS.clear()
 
     def call_model(system, content, output_format):
@@ -43,7 +40,7 @@ def patient_with_history(client):
     rx = client.post("/api/prescriptions", headers=doctor, json={"encounter_id": consult["id"], "items": MEDICINES}).json()
     client.post(f"/api/prescriptions/{rx['id']}/submit", headers=doctor)
     client.post(f"/api/prescriptions/{rx['id']}/approve", headers=doctor)
-    for value in ("140", "118"):  # the same test twice: a comparable trend
+    for value in ("140", "118"):
         order = client.post("/api/lab/orders", headers=doctor, json={"encounter_id": consult["id"],
                                                                      "test_ids": [lab_test_id(client, doctor, "FBS")]}).json()[0]
         client.post(f"/api/lab/orders/{order['id']}/sample", headers=lab, json={})
@@ -63,15 +60,14 @@ def test_overview_is_deterministic_cited_and_scoped(client):
     assert {f"CONS-{consult['id']}", f"RX-{rx['id']}"} <= set(ids) and sum(i.startswith("LAB-") for i in ids) == 2
     briefing = overview["briefing"]
     assert briefing["active_conditions"][0]["text"] == "Type 2 diabetes mellitus"
-    assert briefing["active_conditions"][0]["certainty"] == "provisional"  # never shown as confirmed
-    assert briefing["recent_lab_results"][0]["abnormal"] is True  # 140 mg/dL is above range: listed first
+    assert briefing["active_conditions"][0]["certainty"] == "provisional"
+    assert briefing["recent_lab_results"][0]["abnormal"] is True
     assert briefing["previous_prescriptions"][0]["source_id"] == f"RX-{rx['id']}"
     assert any("ABHA not verified" in m for m in briefing["missing_information"])
     [trend] = overview["lab_trends"]
     assert trend["comparable"] and trend["change"] == -22.0 and trend["points"][0]["unit"] == "mg/dL"
     assert all(i in overview["sources"] for i in ids)
 
-    # Scope follows permissions: lab technicians have no clinical access; reception none at all.
     assert client.get(f"/api/assistant/patients/{patient['id']}/overview", headers=login(client, "labtech")).status_code == 403
     assert client.get(f"/api/assistant/patients/{patient['id']}/overview", headers=login(client, "reception")).status_code == 403
     hims = client.get(f"/api/assistant/patients/{patient['id']}/overview", headers=login(client, "hims")).json()
@@ -85,9 +81,9 @@ def test_summary_and_answers_are_traceable(client):
     assert summary["removed_unsupported"] == 1 and summary["conditions"] == []
     statement = summary["consultations"][0]
     assert statement["kind"] == "documented_fact" and statement["source_ids"][0] in summary["sources"]
-    assert "1999-01-01" not in statement["dates"] and len(statement["dates"]) == 1  # dates must come from the source
+    assert "1999-01-01" not in statement["dates"] and len(statement["dates"]) == 1
     assert summary["missing_information"] == ["No allergy information recorded"]
-    assert "Ramesh" not in PROMPTS[0] and "9876543210" not in PROMPTS[0]  # no direct identifiers sent to the AI
+    assert "Ramesh" not in PROMPTS[0] and "9876543210" not in PROMPTS[0]
 
     answer = client.post(f"/api/assistant/patients/{patient['id']}/ask", headers=doctor,
                          json={"question": "What medicines were previously prescribed?"}).json()
@@ -96,7 +92,7 @@ def test_summary_and_answers_are_traceable(client):
                               json={"question": "Tell me nothing"}).json()
     assert unsupported["information_unavailable"] is True and unsupported["statements"] == []
     logs = client.get("/api/audit-logs?action=assistant.question", headers=login(client, "admin", "Admin1234")).json()
-    assert logs["total"] == 2 and "medicines" not in str(logs["items"])  # the question is not stored
+    assert logs["total"] == 2 and "medicines" not in str(logs["items"])
 
 
 def test_no_records_means_unavailable(client):
@@ -107,8 +103,6 @@ def test_no_records_means_unavailable(client):
     assert answer["information_unavailable"] and "no records" in answer["unavailable_reason"]
     assert client.post(f"/api/assistant/patients/{sita['id']}/summary", headers=doctor).status_code == 422
 
-
-# ---------- security ----------
 
 def test_login_throttling(client):
     for _ in range(5):

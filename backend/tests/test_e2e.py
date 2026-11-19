@@ -1,9 +1,3 @@
-"""Phase 6 end-to-end scenarios A-D through the API, with the real HL7 FHIR validator and the ABDM simulator.
-
-Simulation stands in for the ABDM gateway, consent manager, the patient's ABHA app and other providers;
-nothing here claims a real ABDM exchange.
-"""
-
 import copy
 from datetime import date
 
@@ -95,7 +89,7 @@ def test_scenario_b_lab_report_shared_through_hip(client):
     assert client.post(f"/api/lab/orders/{order['id']}/report/approve", headers=rao).json()["status"] == "completed"
     record = validate(client, hims, "lab_order", order["id"])
     observation = next(e["resource"] for e in record["bundle"]["entry"] if e["resource"]["resourceType"] == "Observation")
-    assert observation["code"] == {"text": "Glucose, fasting"}  # identified by name; the validator accepted it
+    assert observation["code"] == {"text": "Glucose, fasting"}
     verify_and_link(client, hims, patient, "sita.devi@sbx")
     result = share(client, hims, patient, "DiagnosticReport")
     assert [r["profile"] for r in result["received_by_hiu"]] == ["DiagnosticReportRecord"]
@@ -104,7 +98,7 @@ def test_scenario_b_lab_report_shared_through_hip(client):
 def test_scenario_c_previous_records_retrieved_through_hiu(client):
     doctor, hims = login(client, "dr.mehta"), login(client, "hims")
     patient = client.get("/api/patients?q=ramesh", headers=doctor).json()["items"][0]
-    verify_and_link(client, hims, patient, "ramesh.k@sbx")  # ABDM-verified ABHA needed to request records
+    verify_and_link(client, hims, patient, "ramesh.k@sbx")
     request = client.post("/api/hiu/requests", headers=doctor, json={
         "patient_id": patient["id"], "purpose_code": "CAREMGT", "hi_types": ["DiagnosticReport"],
         "date_from": "2024-01-01", "date_to": date.today().isoformat()}).json()
@@ -116,7 +110,7 @@ def test_scenario_c_previous_records_retrieved_through_hiu(client):
     validated = client.post(f"/api/hiu/records/{view['records'][0]['id']}/validate", headers=doctor).json()
     assert validated["validation_status"] == "valid"
     overview = client.get(f"/api/assistant/patients/{patient['id']}/overview", headers=doctor).json()
-    assert len(overview["briefing"]["external_records"]) == 2  # retrieved records feed the assistant
+    assert len(overview["briefing"]["external_records"]) == 2
     history = client.post(f"/api/assistant/patients/{patient['id']}/summary", headers=doctor).json()
     assert history["missing_information"] == ["Allergies not recorded"]
 
@@ -126,8 +120,8 @@ def test_scenario_d_ai_document_entry(client):
     doc = client.get(f"/api/documents/{upload(client, lab, b'LAB REPORT').json()['id']}", headers=lab).json()
     assert doc["extraction_status"] == "completed" and len(doc["data"]["lab_results"]) == 2
     data = accept_all(doc["data"])
-    data["lab_results"][1]["value"]["value"] = "450"  # correction of a misread value
-    data["report_conclusion"] = {"value": "Mild anaemia"}  # missing value added by staff
+    data["lab_results"][1]["value"]["value"] = "450"
+    data["report_conclusion"] = {"value": "Mild anaemia"}
     patient = client.get("/api/patients?q=ramesh", headers=lab).json()["items"][0]
     doc = client.put(f"/api/documents/{doc['id']}", headers=lab, json={
         "data": data, "patient_id": patient["id"], "author_doctor_id": client.get("/api/auth/me", headers=rao).json()["doctor_id"]}).json()

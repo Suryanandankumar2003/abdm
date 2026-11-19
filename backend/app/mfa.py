@@ -24,7 +24,6 @@ def code_at(secret: str, timestamp: float) -> str:
     return _code(secret, int(timestamp // STEP_SECONDS))
 
 def matching_step(secret: str, code: str, now: float | None = None) -> int | None:
-    """The time step `code` belongs to (within the drift window), or None."""
     code = "".join(code.split())
     if len(code) != DIGITS or not code.isdigit():
         return None
@@ -35,7 +34,6 @@ def matching_step(secret: str, code: str, now: float | None = None) -> int | Non
     return None
 
 def provisioning_uri(user: User, secret: str) -> str:
-    """otpauth:// link (and QR code content) for adding the account to an authenticator app."""
     label = quote(f"{settings.mfa_issuer}:{user.username}")
     query = urlencode({"secret": secret, "issuer": settings.mfa_issuer, "digits": DIGITS, "period": STEP_SECONDS})
     return f"otpauth://totp/{label}?{query}"
@@ -52,7 +50,6 @@ def clear(user: User) -> None:
     user.mfa_secret, user.mfa_enabled, user.mfa_last_step = None, False, None
 
 def verify(user: User, code: str | None) -> bool:
-    """Check a code for `user` and consume it (the caller commits). A reused code is refused."""
     secret = secret_of(user)
     if not secret or not code:
         return False

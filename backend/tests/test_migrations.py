@@ -1,5 +1,3 @@
-"""Alembic migrations: they build exactly the schema in app/models.py and upgrade databases made before them."""
-
 from pathlib import Path
 
 from alembic import command
@@ -18,24 +16,22 @@ def _engine(tmp_path: Path, name: str):
 
 
 def test_migrations_match_models(tmp_path):
-    """Fails when app/models.py changed without a migration: run `alembic revision --autogenerate -m ...`."""
     engine = _engine(tmp_path, "fresh.db")
     migrate(engine)
     with engine.connect() as connection:
         context = MigrationContext.configure(connection, opts={"compare_type": True})
         assert compare_metadata(context, Base.metadata) == []
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) is not None
-    migrate(engine)  # running again is a no-op
+    migrate(engine)
     engine.dispose()
 
 
 def test_pre_migration_database_is_upgraded(tmp_path):
-    """A database created by the old create_all (no alembic_version) is stamped at the baseline and upgraded."""
     engine = _engine(tmp_path, "legacy.db")
     migrate(engine)
     config = Config(str(Path(__file__).resolve().parent.parent / "alembic.ini"))
     config.attributes["configure_logger"] = False
-    with engine.begin() as connection:  # turn it back into a pre-migration database at the baseline schema
+    with engine.begin() as connection:
         config.attributes["connection"] = connection
         command.downgrade(config, BASELINE_REVISION)
         connection.execute(text("DROP TABLE alembic_version"))
@@ -46,5 +42,5 @@ def test_pre_migration_database_is_upgraded(tmp_path):
     assert {"token_version", "mfa_enabled"} <= columns
     assert {"user_sessions", "login_failures"} <= set(inspect(engine).get_table_names())
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT name FROM hospitals WHERE id = 1")) == "Old Hospital"  # data kept
+        assert connection.scalar(text("SELECT name FROM hospitals WHERE id = 1")) == "Old Hospital"
     engine.dispose()

@@ -18,10 +18,6 @@ from app.services import audit
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-# Sign-in throttling, counted over the last 15 minutes and stored in login_failures (shared by every worker,
-# kept across restarts). Limits are per username *and* address first, so someone guessing a doctor's password
-# from one computer does not lock the doctor out on theirs; the per-address and per-username limits stop one
-# address trying many accounts and many addresses trying one account.
 WINDOW = timedelta(minutes=15)
 MAX_PER_ACCOUNT_AND_IP, MAX_PER_IP, MAX_PER_ACCOUNT = 5, 20, 50
 TOO_MANY = "Too many failed sign-in attempts. Try again in 15 minutes."
@@ -29,7 +25,6 @@ _DUMMY_HASH = hash_password("timing-equaliser-not-a-password1")
 
 
 def client_ip(request: Request) -> str:
-    # Behind a reverse proxy, run uvicorn with --proxy-headers --forwarded-allow-ips=<proxy> so this is the client.
     return (request.client.host if request.client else None) or "unknown"
 
 
@@ -43,14 +38,14 @@ def is_throttled(db: Session, username: str, ip: str) -> bool:
 
 
 def note_failure(db: Session, username: str, ip: str) -> None:
-    db.execute(delete(LoginFailure).where(LoginFailure.created_at <= utcnow() - WINDOW))  # forget old attempts
+    db.execute(delete(LoginFailure).where(LoginFailure.created_at <= utcnow() - WINDOW))
     db.add(LoginFailure(username=username[:50], ip_address=ip[:50]))
 
 
 def current_user_out(user: User) -> CurrentUser:
     return CurrentUser(
         **UserOut.model_validate(user).model_dump(),
-        hospital_name=user.hospital.name if user.hospital else None,  # None: network administrator
+        hospital_name=user.hospital.name if user.hospital else None,
         permissions=sorted(permissions_for(user)),
         doctor_id=object_session(user).scalar(
             select(Doctor.id).where(Doctor.user_id == user.id, Doctor.is_active.is_(True))),
@@ -60,7 +55,6 @@ def current_user_out(user: User) -> CurrentUser:
 
 
 def start_session(db: Session, user: User, response: Response) -> TokenResponse:
-    """Create a session, commit, and hand it out as a cookie (browser) and in the body (API clients)."""
     token = create_session(db, user)
     db.commit()
     set_session_cookies(response, token)
@@ -74,7 +68,6 @@ def login(body: LoginRequest, request: Request, response: Response, db: Session 
     if is_throttled(db, username, ip):
         raise HTTPException(429, TOO_MANY)
     user = db.scalar(select(User).where(User.username == username))
-    # Unknown users cost the same hash check, so timing does not reveal which usernames exist.
     if not verify_password(body.password, user.password_hash if user else _DUMMY_HASH) or user is None:
         note_failure(db, username, ip)
         audit(db, None, "auth.login_failed", "user", details={"username": body.username[:50]},
@@ -92,9 +85,9 @@ def login(body: LoginRequest, request: Request, response: Response, db: Session 
             audit(db, user, "auth.mfa_failed", "user", user.id, request=request)
             db.commit()
             raise HTTPException(401, {"code": "mfa_invalid", "message": "That code is not valid. Try the current one."})
-    db.execute(delete(LoginFailure).where(LoginFailure.username == username))  # success resets the counters
+    db.execute(delete(LoginFailure).where(LoginFailure.username == username))
     if needs_rehash(user.password_hash):
-        user.password_hash = hash_password(body.password)  # upgrade to the current scrypt cost
+        user.password_hash = hash_password(body.password)
     user.last_login_at = utcnow()
     audit(db, user, "auth.login", "user", user.id, request=request)
     return start_session(db, user, response)
@@ -111,7 +104,7 @@ def change_password(body: ChangePasswordRequest, request: Request, response: Res
     if not verify_password(body.current_password, user.password_hash):
         raise HTTPException(400, "Current password is incorrect")
     user.password_hash = hash_password(body.new_password)
-    revoke_tokens(user)  # every other session (e.g. a stolen token) ends; this one continues with a new session
+    revoke_tokens(user)
     audit(db, user, "auth.password_changed", "user", user.id, request=request)
     return start_session(db, user, response)
 
@@ -119,7 +112,6 @@ def change_password(body: ChangePasswordRequest, request: Request, response: Res
 @router.post("/logout", status_code=204)
 def logout(request: Request, response: Response, user: User = Depends(get_session_user),
            db: Session = Depends(get_db)):
-    """Sign out of this session only; the user's other sessions (other computers) continue."""
     end_session(db, request.state.session_id)
     audit(db, user, "auth.logout", "user", user.id, request=request)
     db.commit()
@@ -129,18 +121,14 @@ def logout(request: Request, response: Response, user: User = Depends(get_sessio
 @router.post("/logout-all", status_code=204)
 def logout_all(request: Request, response: Response, user: User = Depends(get_session_user),
                db: Session = Depends(get_db)):
-    """Sign out everywhere: every session of this user ends, on every computer."""
     revoke_tokens(user)
     audit(db, user, "auth.logout_all", "user", user.id, request=request)
     db.commit()
     clear_session_cookies(response)
 
 
-# ---------- two-step sign-in (authenticator app) ----------
-
 @router.post("/mfa/setup", response_model=MfaSetupOut)
 def mfa_setup(user: User = Depends(get_session_user), db: Session = Depends(get_db)):
-    """Create a new secret to add to an authenticator app; it is used only after /mfa/enable confirms a code."""
     if user.mfa_enabled:
         raise HTTPException(400, "Two-step sign-in is already on. Turn it off first to move it to a new app.")
     secret = mfa.new_secret()
@@ -159,7 +147,7 @@ def mfa_enable(body: MfaCodeRequest, request: Request, response: Response,
     if not mfa.verify(user, body.code):
         raise HTTPException(400, "That code is not valid. Check the app shows this account and try the current code.")
     user.mfa_enabled = True
-    revoke_tokens(user)  # sessions opened without the second step end; this one continues
+    revoke_tokens(user)
     audit(db, user, "auth.mfa_enabled", "user", user.id, request=request)
     return start_session(db, user, response)
 

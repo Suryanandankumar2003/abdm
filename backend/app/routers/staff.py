@@ -19,7 +19,6 @@ def role_by_code(db: Session, code: str) -> Role:
 
 
 def hospital_roles(db: Session) -> list[RoleOut]:
-    """The roles a hospital's staff can have (not the network administrator)."""
     return [RoleOut(code=r.code, name=r.name, description=r.description,
                     permissions=sorted(ROLES[r.code]["permissions"]))
             for r in db.scalars(select(Role).where(Role.code.in_(get_args(RoleCode))).order_by(Role.id))]
@@ -38,7 +37,6 @@ def staff_query(hospital_id: int, q: str | None, role: str | None, is_active: bo
 
 
 def create_staff_account(db: Session, hospital_id: int, body: StaffCreate, actor: User, request: Request) -> User:
-    """Add a staff account to a hospital (by its administrator or a network administrator)."""
     username = body.username.lower()
     if db.scalar(select(User.id).where(User.username == username)):
         raise HTTPException(409, "Username is already taken")
@@ -70,7 +68,7 @@ def update_staff_account(db: Session, staff: User, body: StaffUpdate, actor: Use
         staff.role = role_by_code(db, role)
     changes.update(changed_fields(staff, data))
     if "password" in changes or "role" in changes or data.get("is_active") is False:
-        revoke_tokens(staff)  # existing sessions must not keep the old password, permissions or access
+        revoke_tokens(staff)
     if changes:
         audit(db, actor, "staff.update", "user", staff.id, {"changes": changes}, request, hospital_id=staff.hospital_id)
         db.commit()
@@ -119,5 +117,4 @@ def update_staff(user_id: int, body: StaffUpdate, request: Request,
 @router.delete("/staff/{user_id}/mfa", response_model=UserOut)
 def reset_staff_mfa(user_id: int, request: Request,
                     user: User = Depends(require("staff:manage")), db: Session = Depends(get_db)):
-    """Turn off a staff member's two-step sign-in (lost phone); they set it up again at their next sign-in."""
     return reset_staff_two_step(db, get_or_404(db, User, user_id, user.hospital_id), user, request)

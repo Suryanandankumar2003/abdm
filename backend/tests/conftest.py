@@ -2,18 +2,17 @@ import os
 import tempfile
 from pathlib import Path
 
-# Configure an isolated database before the app is imported.
 _db_file = Path(tempfile.mkdtemp()) / "test.db"
 os.environ["DATABASE_URL"] = f"sqlite:///{_db_file.as_posix()}"
 os.environ["JWT_SECRET"] = "test-secret-that-is-long-enough-for-hs256-signing"
-os.environ["PASSWORD_SCRYPT_N"] = "16384"  # the minimum; keeps the many test sign-ins fast
+os.environ["PASSWORD_SCRYPT_N"] = "16384"
 
-import pytest  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
+import pytest
+from fastapi.testclient import TestClient
 
-from app.database import Base, SessionLocal, engine  # noqa: E402
-from app.main import app  # noqa: E402
-from init_db import DEMO_PASSWORD, seed, seed_demo  # noqa: E402
+from app.database import Base, SessionLocal, engine
+from app.main import app
+from init_db import DEMO_PASSWORD, seed, seed_demo
 
 ADMIN_PASSWORD = "Admin1234"
 
@@ -24,7 +23,6 @@ ICD10_TITLES = {"E11.9": "Type 2 diabetes mellitus without complications", "I10"
 
 @pytest.fixture(autouse=True)
 def offline_terminology(monkeypatch):
-    """Tests never call the terminology server; known ICD-10 titles stand in for $lookup."""
     from app.routers import fhir
     monkeypatch.setattr(fhir, "terminology_display", lambda system, code: ICD10_TITLES.get(code))
 
@@ -42,7 +40,7 @@ def client():
 def login(client, username, password=DEMO_PASSWORD) -> dict:
     response = client.post("/api/auth/login", json={"username": username, "password": password})
     assert response.status_code == 200, response.text
-    client.cookies.clear()  # tests authenticate with the header; the session cookie is tested on its own
+    client.cookies.clear()
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
 
 

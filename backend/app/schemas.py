@@ -7,8 +7,6 @@ from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Fie
 T = TypeVar("T")
 
 
-# ---------- reusable field types ----------
-
 def _blank_to_none(value):
     if isinstance(value, str):
         value = value.strip()
@@ -17,7 +15,6 @@ def _blank_to_none(value):
 
 
 def _as_utc(value: datetime) -> datetime:
-    # SQLite returns naive datetimes; they are stored as UTC.
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
@@ -95,12 +92,10 @@ class Page(BaseModel, Generic[T]):
     page_size: int
 
 
-# ---------- auth / users ----------
-
 class LoginRequest(BaseModel):
     username: str
     password: str
-    otp: str | None = None  # 6-digit authenticator code, when the user has two-step sign-in
+    otp: str | None = None
 
 
 class ChangePasswordRequest(BaseModel):
@@ -117,8 +112,8 @@ class UserOut(ORMModel):
     is_active: bool
     role_code: str
     role_name: str
-    hospital_id: int | None  # None: network administrator
-    mfa_enabled: bool = False  # two-step sign-in is on
+    hospital_id: int | None
+    mfa_enabled: bool = False
     last_login_at: UTCDateTime | None
     created_at: UTCDateTime
 
@@ -126,20 +121,20 @@ class UserOut(ORMModel):
 class CurrentUser(UserOut):
     hospital_name: str | None
     permissions: list[str]
-    doctor_id: int | None = None  # linked doctor profile, needed for clinical authoring/approval
-    mfa_setup_required: bool = False  # the role requires two-step sign-in and it is not set up yet
-    session_idle_minutes: int  # the app signs out after this long without activity
+    doctor_id: int | None = None
+    mfa_setup_required: bool = False
+    session_idle_minutes: int
 
 
 class TokenResponse(BaseModel):
-    access_token: str  # for API clients; the browser uses the HttpOnly session cookie set with this response
+    access_token: str
     token_type: str = "bearer"
     user: CurrentUser
 
 
 class MfaSetupOut(BaseModel):
-    secret: str  # base32, for typing into the authenticator app
-    otpauth_uri: str  # the same as a link / QR code content
+    secret: str
+    otpauth_uri: str
 
 
 class MfaCodeRequest(BaseModel):
@@ -166,7 +161,7 @@ class StaffUpdate(BaseModel):
     phone: OptPhone = None
     role: RoleCode | None = None
     is_active: bool | None = None
-    password: Password | None = None  # administrator password reset
+    password: Password | None = None
 
 
 class RoleOut(ORMModel):
@@ -176,13 +171,11 @@ class RoleOut(ORMModel):
     permissions: list[str] = []
 
 
-# ---------- hospital ----------
-
 class HospitalUpdate(BaseModel):
     name: Name | None = None
     hfr_id: OptStr = None
-    abdm_hip_id: OptStr = None  # facility ID registered as this hospital's HIP service
-    abdm_hiu_id: OptStr = None  # facility ID registered as this hospital's HIU service
+    abdm_hip_id: OptStr = None
+    abdm_hiu_id: OptStr = None
     facility_type: OptStr = None
     address: OptStr = None
     city: OptStr = None
@@ -209,10 +202,8 @@ class HospitalOut(ORMModel):
     created_at: UTCDateTime
 
 
-# ---------- network administration (every hospital) ----------
-
 class NetworkHospitalUpdate(HospitalUpdate):
-    is_active: bool | None = None  # off: none of the hospital's staff can sign in; ABDM no longer routes to it
+    is_active: bool | None = None
 
 
 class FirstAdmin(BaseModel):
@@ -223,8 +214,8 @@ class FirstAdmin(BaseModel):
 
 class NetworkHospitalCreate(HospitalUpdate):
     name: Name
-    code: Annotated[str, Field(pattern=r"^[A-Za-z0-9]{2,10}$")]  # patient ID prefix, fixed once created
-    admin: FirstAdmin | None = None  # the hospital's own administrator account
+    code: Annotated[str, Field(pattern=r"^[A-Za-z0-9]{2,10}$")]
+    admin: FirstAdmin | None = None
 
 
 class HospitalStats(BaseModel):
@@ -232,7 +223,7 @@ class HospitalStats(BaseModel):
     active_staff: int
     doctors: int
     patients: int
-    shared_records: int  # care contexts linked to patients' ABHA addresses (shareable through ABDM)
+    shared_records: int
 
 
 class StaffBrief(ORMModel):
@@ -247,8 +238,6 @@ class NetworkHospitalOut(HospitalOut):
     stats: HospitalStats
     admins: list[StaffBrief]
 
-
-# ---------- doctors ----------
 
 RegistrationNumber = Annotated[str, Field(min_length=3, max_length=50)]
 
@@ -282,14 +271,12 @@ class DoctorOut(DoctorBase, ORMModel):
     created_at: UTCDateTime
 
 
-# ---------- patients ----------
-
 class PatientFields(BaseModel):
     full_name: Name
     gender: Gender
     mobile: Mobile
     date_of_birth: date | None = None
-    age: Annotated[int | None, Field(ge=0, le=130)] = None  # used when DOB is unknown
+    age: Annotated[int | None, Field(ge=0, le=130)] = None
     address_line: OptStr = None
     city: OptStr = None
     state: OptStr = None
@@ -316,7 +303,7 @@ class PatientFields(BaseModel):
 
 
 class PatientCreate(PatientFields):
-    confirm_not_duplicate: bool = False  # set after staff reviewed the possible duplicates
+    confirm_not_duplicate: bool = False
 
     @model_validator(mode="after")
     def need_dob_or_age(self):
@@ -332,7 +319,6 @@ class PatientUpdate(PatientFields):
 
 
 class AbhaVerifyRequest(BaseModel):
-    # Phase 1 supports only staff-recorded checks; ABDM OTP/API verification comes later.
     method: Literal["physical_abha_card", "abha_app_profile"]
     note: Annotated[str, Field(min_length=5, max_length=300)]
 
@@ -372,8 +358,6 @@ class DuplicateCandidate(BaseModel):
     reasons: list[str]
 
 
-# ---------- dashboard / audit ----------
-
 class AuditLogOut(ORMModel):
     id: int
     action: str
@@ -403,10 +387,6 @@ class DashboardOut(BaseModel):
     recent_activity: list[AuditLogOut]
 
 
-# ---------- clinical records (Phase 2) ----------
-
-# Clinical vocabularies of the forms, with the codes app.fhir exports them as.
-# VITAL_SIGNS key: (label, LOINC code, UCUM unit, min, max)
 VITAL_SIGNS = {
     "temperature": ("Body temperature", "8310-5", "Cel", 30, 45), "pulse": ("Heart rate", "8867-4", "/min", 20, 250),
     "respiratory_rate": ("Respiratory rate", "9279-1", "/min", 4, 80),
@@ -415,7 +395,6 @@ VITAL_SIGNS = {
     "spo2": ("Oxygen saturation", "2708-6", "%", 50, 100), "weight": ("Body weight", "29463-7", "kg", 0.3, 400),
     "height": ("Body height", "8302-2", "cm", 20, 250),
 }
-# key: (label, SNOMED CT code, SNOMED preferred term)
 ROUTES = {
     "oral": ("Oral", "26643006", "Oral route"), "iv": ("Intravenous", "47625008", "Intravenous route"),
     "im": ("Intramuscular", "78421000", "Intramuscular route"), "sc": ("Subcutaneous", "34206005", "Subcutaneous route"),
@@ -424,7 +403,6 @@ ROUTES = {
     "ophthalmic": ("Eye", "54485002", "Ophthalmic route"), "otic": ("Ear", "10547007", "Otic route"),
     "rectal": ("Rectal", "37161004", "Rectal route"),
 }
-# key: (label, FHIR Timing.repeat, or None for "as needed")
 FREQUENCIES = {
     "OD": ("Once daily", {"frequency": 1, "period": 1, "periodUnit": "d"}),
     "BD": ("Twice daily", {"frequency": 2, "period": 1, "periodUnit": "d"}),
@@ -470,7 +448,7 @@ class RecordMeta(ORMModel):
 class ConditionIn(BaseModel):
     display: Text300
     code: Annotated[Annotated[str, Field(pattern=r"^[A-Z][0-9]{2}(\.[0-9A-Z]{1,4})?$")] | None,
-                    BeforeValidator(lambda v: _blank_to_none(v.upper()) if isinstance(v, str) else v)] = None  # ICD-10
+                    BeforeValidator(lambda v: _blank_to_none(v.upper()) if isinstance(v, str) else v)] = None
     clinical_status: Literal["active", "recurrence", "inactive", "resolved"] = "active"
     verification_status: Literal["provisional", "confirmed", "differential"] = "provisional"
     onset_date: date | None = None
@@ -501,7 +479,7 @@ class EncounterUpdate(BaseModel):
     follow_up_instructions: OptText = None
     follow_up_date: date | None = None
     doctor_notes: OptText = None
-    diagnoses: list[ConditionIn] | None = None  # replaces the consultation's diagnoses
+    diagnoses: list[ConditionIn] | None = None
 
 
 class EncounterOut(RecordMeta):
@@ -559,7 +537,7 @@ class LabParameter(BaseModel):
     unit: OptStr = None
     ref_low: float | None = None
     ref_high: float | None = None
-    ref_text: OptStr = None  # e.g. "Negative" for non-numeric results
+    ref_text: OptStr = None
 
     @model_validator(mode="after")
     def check_range(self):
@@ -606,7 +584,7 @@ class SampleCollect(BaseModel):
 class LabResultIn(BaseModel):
     code: str
     value: OptStr = None
-    interpretation: Literal["N", "L", "H", "A"] | None = None  # only used when it cannot be calculated
+    interpretation: Literal["N", "L", "H", "A"] | None = None
 
 
 class LabReportIn(BaseModel):
@@ -659,14 +637,12 @@ class PatientHistory(BaseModel):
     lab_orders: list[LabOrderOut]
 
 
-# ---------- AI documents and FHIR records (Phase 3) ----------
-
 class DocumentUpdate(BaseModel):
     document_type: Literal["prescription", "lab_report", "opd_consultation", "discharge_summary",
                            "immunization", "wellness", "clinical_note", "other"] | None = None
     patient_id: int | None = None
     author_doctor_id: int | None = None
-    data: dict | None = None  # app.extraction.ReviewedRecord
+    data: dict | None = None
 
 
 class DocumentSummary(RecordMeta):
@@ -685,9 +661,9 @@ class DocumentOut(DocumentSummary):
     ai_model: str | None
     text: str | None
     data: dict | None
-    requirements: list[str] = []  # what must be completed before submitting
+    requirements: list[str] = []
     review_counts: dict[str, int] = {}
-    warnings: list[str] = []  # document details that differ from the linked registered patient
+    warnings: list[str] = []
     fhir_record_id: int | None = None
 
 

@@ -13,8 +13,6 @@ def register(client, headers, **overrides):
     return client.post("/api/patients", json={**NEW_PATIENT, **overrides}, headers=headers)
 
 
-# ---------- auth ----------
-
 def test_health(client):
     assert client.get("/api/health").json() == {"status": "ok"}
 
@@ -51,7 +49,6 @@ def test_change_password(client):
     ok = client.post("/api/auth/change-password", headers=headers,
                      json={"current_password": "Demo@1234", "new_password": "NewPass123"})
     assert ok.status_code == 200
-    # Every earlier session ends; the session that changed the password continues with its new token.
     assert client.get("/api/auth/me", headers=headers).status_code == 401
     assert client.get("/api/auth/me", headers=other_session).status_code == 401
     fresh = {"Authorization": f"Bearer {ok.json()['access_token']}"}
@@ -63,7 +60,7 @@ def test_logout_ends_only_this_session(client):
     first, second = login(client, "reception"), login(client, "reception")
     assert client.post("/api/auth/logout", headers=first).status_code == 204
     assert client.get("/api/auth/me", headers=first).status_code == 401
-    assert client.get("/api/auth/me", headers=second).status_code == 200  # the other computer stays signed in
+    assert client.get("/api/auth/me", headers=second).status_code == 200
 
 
 def test_logout_all_ends_every_session(client):
@@ -77,14 +74,13 @@ def test_logout_all_ends_every_session(client):
 def test_staff_changes_revoke_sessions(client, admin):
     staff = {u["username"]: u["id"] for u in client.get("/api/staff", headers=admin).json()["items"]}
     reception, labtech = login(client, "reception"), login(client, "labtech")
-    # Editing contact details keeps sessions; a password reset or deactivation ends them.
     assert client.patch(f"/api/staff/{staff['reception']}", headers=admin, json={"phone": "9876543210"}).status_code == 200
     assert client.get("/api/auth/me", headers=reception).status_code == 200
     assert client.patch(f"/api/staff/{staff['reception']}", headers=admin, json={"password": "Reset1234"}).status_code == 200
     assert client.get("/api/auth/me", headers=reception).status_code == 401
     assert client.patch(f"/api/staff/{staff['labtech']}", headers=admin, json={"is_active": False}).status_code == 200
     client.patch(f"/api/staff/{staff['labtech']}", headers=admin, json={"is_active": True})
-    assert client.get("/api/auth/me", headers=labtech).status_code == 401  # reactivation does not revive old tokens
+    assert client.get("/api/auth/me", headers=labtech).status_code == 401
 
 
 def test_token_without_version_is_rejected(client):
@@ -99,8 +95,6 @@ def test_api_csp_header(client, admin):
     assert "default-src 'none'" in csp and "frame-ancestors 'none'" in csp
 
 
-# ---------- role permissions ----------
-
 def test_role_permissions(client):
     doctor, reception, lab, hims = (login(client, u) for u in ("dr.mehta", "reception", "labtech", "hims"))
     assert register(client, doctor).status_code == 403
@@ -114,8 +108,6 @@ def test_role_permissions(client):
     assert client.get("/api/dashboard", headers=lab).json()["recent_activity"] == []
 
 
-# ---------- hospital ----------
-
 def test_hospital_profile(client, admin):
     assert client.get("/api/hospital", headers=admin).json()["code"] == "TST"
     updated = client.put("/api/hospital", headers=admin,
@@ -125,8 +117,6 @@ def test_hospital_profile(client, admin):
     assert client.put("/api/hospital", headers=admin, json={"pincode": "12"}).status_code == 422
     assert client.put("/api/hospital", headers=admin, json={"name": ""}).status_code == 422
 
-
-# ---------- staff ----------
 
 def test_staff_crud(client, admin):
     roles = client.get("/api/roles", headers=admin).json()
@@ -163,8 +153,6 @@ def test_password_reset_by_admin(client, admin):
     login(client, "labtech", "Reset1234")
 
 
-# ---------- doctors ----------
-
 def test_doctor_crud(client, admin):
     doctors = client.get("/api/doctors", headers=admin).json()
     assert doctors["total"] == 2
@@ -173,7 +161,6 @@ def test_doctor_crud(client, admin):
     assert created.status_code == 201
     assert client.post("/api/doctors", json=body, headers=admin).status_code == 409
 
-    # Linking requires a free account with the Doctor role.
     reception_id = client.get("/api/staff?q=reception", headers=admin).json()["items"][0]["id"]
     doctor_id = created.json()["id"]
     assert client.patch(f"/api/doctors/{doctor_id}", json={"user_id": reception_id}, headers=admin).status_code == 400
@@ -186,8 +173,6 @@ def test_doctor_crud(client, admin):
     assert client.get("/api/doctors?is_active=true", headers=admin).json()["total"] == 2
     assert client.get("/api/doctors?q=cardio", headers=admin).json()["total"] == 1
 
-
-# ---------- patients ----------
 
 def test_register_patient_normalises_fields_and_is_unverified(client):
     reception = login(client, "reception")
@@ -209,7 +194,7 @@ def test_patient_validation(client):
     assert register(client, reception, abha_number="1234").status_code == 422
     assert register(client, reception, abha_address="bad address").status_code == 422
     assert register(client, reception, date_of_birth="2999-01-01").status_code == 422
-    assert register(client, reception, date_of_birth=None).status_code == 422  # neither DOB nor age
+    assert register(client, reception, date_of_birth=None).status_code == 422
     with_age = register(client, reception, date_of_birth=None, age=40, abha_number=None, abha_address=None)
     assert with_age.status_code == 201
     assert with_age.json()["date_of_birth"] is None
@@ -219,13 +204,11 @@ def test_duplicate_workflow(client):
     reception = login(client, "reception")
     assert register(client, reception).status_code == 201
 
-    # Same ABHA is never allowed twice.
     same_abha = register(client, reception, full_name="Someone Else", mobile="9000000001",
                          abha_address=None, confirm_not_duplicate=True)
     assert same_abha.status_code == 409
     assert same_abha.json()["detail"]["duplicates"][0]["level"] == "exact"
 
-    # Same person without ABHA: warned, then allowed only with explicit confirmation.
     probable = {"full_name": "Meera  Nair", "abha_number": None, "abha_address": None}
     check = client.post("/api/patients/duplicate-check", json={**NEW_PATIENT, **probable}, headers=reception)
     assert check.json()[0]["level"] == "likely"
@@ -234,13 +217,11 @@ def test_duplicate_workflow(client):
     assert "Same mobile number" in blocked.json()["detail"]["duplicates"][0]["reasons"]
     assert register(client, reception, **probable, confirm_not_duplicate=True).status_code == 201
 
-    # Name order swapped and similar birth year with a different phone: possible duplicate.
     swapped = client.post("/api/patients/duplicate-check", headers=reception, json={
         **NEW_PATIENT, "full_name": "Nair Meera", "mobile": "9111111111", "date_of_birth": "1991-01-01",
         "abha_number": None, "abha_address": None})
     assert swapped.json()[0]["level"] == "possible"
 
-    # A family member sharing the phone is not flagged.
     family = client.post("/api/patients/duplicate-check", headers=reception, json={
         **NEW_PATIENT, "full_name": "Ravi Nair", "gender": "M", "abha_number": None, "abha_address": None})
     assert family.json() == []
@@ -259,7 +240,6 @@ def test_search_uses_only_verified_abha(client):
     assert search("91-1234-5678-9012") == 0
     assert search("meera.nair@abdm") == 0
 
-    # Receptionists cannot verify; authorised health information staff can.
     verify = {"method": "physical_abha_card", "note": "ABHA card checked at desk"}
     assert client.post(f"/api/patients/{patient['id']}/abha/verify", json=verify, headers=reception).status_code == 403
     verified = client.post(f"/api/patients/{patient['id']}/abha/verify", json=verify, headers=hims)
@@ -283,7 +263,6 @@ def test_changing_abha_resets_verification(client):
     assert updated.json()["abha_verified"] is False
     assert updated.json()["abha_verification_method"] is None
 
-    # Updating other fields keeps the record intact.
     renamed = client.patch(f"/api/patients/{patient['id']}", json={"city": "Thrissur", "age": 36}, headers=reception)
     assert renamed.json()["city"] == "Thrissur"
     assert renamed.json()["date_of_birth"] is None
@@ -335,8 +314,6 @@ def test_patient_detail_is_audited(client, admin):
     assert logs["items"][0]["user_name"] == "Dr. Anil Mehta"
 
 
-# ---------- dashboard ----------
-
 def test_dashboard(client, admin):
     register(client, admin)
     data = client.get("/api/dashboard", headers=admin).json()
@@ -346,8 +323,6 @@ def test_dashboard(client, admin):
     assert data["recent_patients"][0]["full_name"] == "Meera Nair"
     assert data["recent_activity"][0]["action"] == "patient.create"
 
-
-# ---------- multi-hospital isolation ----------
 
 def test_hospitals_are_isolated(client):
     from app.database import SessionLocal

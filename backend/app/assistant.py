@@ -1,10 +1,3 @@
-"""AI hospital assistant: a read-only view of one patient's records, limited to what the current user may see.
-
-Timeline, doctor briefing and lab trends are computed without AI. Summaries and answers come from Mistral but
-are checked: every statement must cite records from this user's corpus, dates must appear in those records,
-and documented facts are separated from AI interpretation. Nothing here writes to clinical records.
-"""
-
 import json
 from datetime import datetime
 from typing import Literal
@@ -19,7 +12,7 @@ from app.hiu import enforce_retention
 from app.models import ClinicalDocument, Encounter, LabOrder, Patient, Prescription, RetrievedRecord, User
 from app.security import permissions_for
 
-MAX_ITEMS = 60  # most recent records sent to the AI
+MAX_ITEMS = 60
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -27,7 +20,6 @@ def _iso(value: datetime | None) -> str | None:
 
 
 def corpus(db: Session, user: User, patient: Patient) -> list[dict]:
-    """Every record of the patient this user may read, newest first, as plain facts with a source id."""
     perms, items = permissions_for(user), []
     if "clinical:read" in perms:
         for e in db.scalars(select(Encounter).where(Encounter.patient_id == patient.id, Encounter.status == "approved")):
@@ -71,7 +63,7 @@ def corpus(db: Session, user: User, patient: Patient) -> list[dict]:
                               "hospital_course": value(rec.encounter.hospital_course),
                               "conclusion": value(rec.report_conclusion), "notes": value(rec.notes)}})
     if "hiu:records" in perms:
-        enforce_retention(db)  # expired or revoked external data is never shown
+        enforce_retention(db)
         for row in db.scalars(select(RetrievedRecord).where(RetrievedRecord.patient_id == patient.id)):
             facts = hiu.describe(hiu.bundle_json(row))
             items.append({"id": f"EXT-{row.id}", "type": f"External: {facts['category']}", "date": facts["date"],
@@ -89,17 +81,13 @@ def visible_categories(user: User) -> list[str]:
     return [label for perm, label in names.items() if perm in perms]
 
 
-# ---------- deterministic views ----------
-
 def lab_observations(items: list[dict]) -> list[tuple[str, dict]]:
-    """Lab results of internal, document and external records in the shape hiu.lab_trends expects."""
     out = []
     for item in items:
         facts = item["facts"]
         if item["id"].startswith("EXT-"):
             out.append((item["id"], {"observations": facts.get("observations", [])}))
             continue
-        # This hospital's results carry no test codes, so lab_trends groups them by name.
         observations = [{"category": "laboratory", "name": r["name"], "loinc": None,
                          "value": r.get("value_numeric") if r.get("value_numeric") is not None else _number(r.get("value")),
                          "value_text": r.get("value"), "unit": r.get("unit"), "date": item["date"],
@@ -118,8 +106,9 @@ def _number(text: str | None) -> float | None:
 
 
 def briefing(items: list[dict], patient: Patient, user: User) -> dict:
-    """What a doctor sees on opening the patient: recent documented history, no AI, every line cited."""
-    of = lambda prefix: [i for i in items if i["id"].startswith(prefix)]  # noqa: E731
+    def of(prefix: str) -> list[dict]:
+        return [i for i in items if i["id"].startswith(prefix)]
+
     consultations, prescriptions, labs, external = of("CONS-"), of("RX-"), of("LAB-") + of("DOC-"), of("EXT-")
     active = [{"text": d["text"], "certainty": d["certainty"], "source_id": c["id"], "date": c["date"]}
               for c in consultations for d in c["facts"]["diagnoses"] if d["status"] in ("active", "recurrence")]
@@ -150,8 +139,6 @@ def briefing(items: list[dict], patient: Patient, user: User) -> dict:
         "scope": visible_categories(user),
     }
 
-
-# ---------- AI summary and questions ----------
 
 class Statement(BaseModel):
     text: str
@@ -191,7 +178,6 @@ SUMMARY_TASK = "Summarise the patient's documented history in the sections provi
 
 
 def _check(statements: list[dict], by_id: dict[str, dict]) -> tuple[list[dict], int]:
-    """Keep statements that cite known records; keep only dates that occur in the cited records."""
     kept = []
     for s in statements:
         if not s["source_ids"] or not set(s["source_ids"]) <= set(by_id):
@@ -209,7 +195,6 @@ def _payload(items: list[dict], extra: dict) -> list[dict]:
 
 
 def call_model(system: str, content: list[dict], output_format):
-    """The model call; replaced by a fake in tests."""
     return ai.structured(system, content, output_format, max_tokens=8000)
 
 

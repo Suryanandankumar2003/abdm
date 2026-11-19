@@ -1,10 +1,3 @@
-"""AI extraction of clinical documents (Mistral AI) into a reviewable, Pydantic-validated record.
-
-Kept separate from FHIR generation: this module only turns a file into `ReviewedRecord` data.
-PDFs (text or scanned) and images are read by Mistral OCR; DOCX and TXT text is extracted locally.
-The text then goes to the Mistral chat model for structured extraction.
-"""
-
 import xml.etree.ElementTree as ET
 import zipfile
 from io import BytesIO
@@ -31,12 +24,11 @@ class AIField(BaseModel):
 
 
 class ReviewField(BaseModel):
-    """A value plus where it came from and what staff decided about it."""
     value: str | None = None
     confidence: float | None = None
     evidence: str | None = None
     source: Literal["ai", "manual"] = "manual"
-    status: Literal["extracted", "uncertain", "missing"] = "missing"  # recomputed by refresh_status()
+    status: Literal["extracted", "uncertain", "missing"] = "missing"
     review: Literal["pending", "accepted", "rejected", "edited"] = "pending"
 
 
@@ -133,10 +125,7 @@ class ReviewedRecord(Extraction[ReviewField]):
     lab_results: list[LabResult[ReviewField]] = []
 
 
-# ---------- review helpers ----------
-
 def iter_fields(model: BaseModel, path: str = "") -> Iterator[tuple[str, ReviewField]]:
-    """Yield (dotted path, field) for every ReviewField in a reviewed record."""
     for name in type(model).model_fields:
         value = getattr(model, name)
         items = value if isinstance(value, list) else [value]
@@ -172,7 +161,6 @@ def to_reviewed(extraction: Extraction[AIField]) -> ReviewedRecord:
 
 
 def blank_record(document_type: str = "other") -> ReviewedRecord:
-    """An empty record for manual entry (e.g. when AI extraction is unavailable)."""
     def build(cls, **extra):
         values = {}
         for name, f in cls.model_fields.items():
@@ -187,11 +175,8 @@ def blank_record(document_type: str = "other") -> ReviewedRecord:
 
 
 def value(f: ReviewField | None) -> str | None:
-    """The value to use downstream: rejected suggestions count as absent."""
     return None if f is None or f.review == "rejected" else f.value
 
-
-# ---------- file handling and the model call ----------
 
 class ExtractionError(Exception):
     pass
@@ -205,7 +190,6 @@ def docx_text(data: bytes) -> str:
 
 
 def document_text(data: bytes, content_type: str) -> str | None:
-    """Plain text for DOCX/TXT (used for the prompt and the preview); None for PDFs and images."""
     if content_type == DOCX_TYPE:
         return docx_text(data)
     if content_type == "text/plain":
@@ -244,7 +228,6 @@ def content_blocks(data: bytes, content_type: str, filename: str) -> list[dict]:
 
 
 def call_model(blocks: list[dict]) -> Extraction[AIField]:
-    """One structured-output request to Mistral. Replaced by a fake in tests."""
     try:
         return ai.structured(SYSTEM_PROMPT, blocks, Extraction[AIField])
     except ai.AIError as exc:

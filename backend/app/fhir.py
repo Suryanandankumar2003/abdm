@@ -1,7 +1,3 @@
-"""FHIR R4 (4.0.1) engine for ABDM (NRCES implementation guide `ndhm.in` 6.5.0): build_bundle() turns ClinicalContent
-(what one approved record says, made in app.routers.fhir) plus the registry's patient, doctor and hospital into an ABDM
-document Bundle. Checking it (prechecks, the HL7 validator) is in app.routers.fhir."""
-
 from datetime import date, datetime, timezone
 from html import escape
 from typing import Literal
@@ -10,7 +6,7 @@ from uuid import NAMESPACE_URL, uuid5
 from pydantic import BaseModel
 
 from app.models import Doctor, Hospital, Patient
-from app.schemas import FREQUENCIES, ROUTES, VITAL_SIGNS  # noqa: F401  (form vocabularies)
+from app.schemas import FREQUENCIES, ROUTES, VITAL_SIGNS
 
 FHIR_VERSION, IG_PACKAGE = "4.0.1", "ndhm.in#6.5.0"
 NRCES = "https://nrces.in/ndhm/fhir/r4/StructureDefinition/"
@@ -23,13 +19,11 @@ RecordType = Literal["OPConsultRecord", "PrescriptionRecord", "DiagnosticReportR
 
 
 class ClinicalContent(BaseModel):
-    """Engine input. List items are plain dicts (keys as read in Builder); `text` holds chief_complaint, history,
-    findings, plan, follow_up, hospital_course, notes."""
     record_type: RecordType
-    key: str  # stable identity of the source record, e.g. "consultation-5"
+    key: str
     title: str
-    date: datetime  # composition date (approval time)
-    encounter: dict | None = None  # start, end, inpatient, status, reason
+    date: datetime
+    encounter: dict | None = None
     conditions: list[dict] = []
     allergies: list[dict] = []
     observations: list[dict] = []
@@ -37,12 +31,11 @@ class ClinicalContent(BaseModel):
     orders: list[dict] = []
     reports: list[dict] = []
     immunizations: list[dict] = []
-    attachment: dict | None = None  # content_type, data (base64), title
+    attachment: dict | None = None
     text: dict = {}
 
 
 def uid(kind: str, key) -> str:
-    """Stable UUID per local record, so regenerating a bundle keeps the same resource ids."""
     return str(uuid5(NAMESPACE_URL, f"abdm-hospital/{kind}/{key}"))
 
 
@@ -67,7 +60,6 @@ def narrative(text: str) -> dict:
 
 
 def resource(rtype: str, rid: str, profile: str | None, summary: str, **fields) -> dict:
-    """A resource with its ABDM profile and a short narrative. Empty fields are left out (FHIR forbids nulls)."""
     res = {"resourceType": rtype, "id": rid, "meta": {"profile": [NRCES + profile]} if profile else None,
            "text": narrative(summary), **fields}
     return {k: v for k, v in res.items() if v not in (None, "", [], {})}
@@ -81,7 +73,6 @@ def local(h: Hospital, what: str) -> str:
     return f"urn:abdm-hospital:{h.code.lower()}:{what}"
 
 
-# Parties always come from the registry, never from extracted text.
 def organization(h: Hospital) -> dict:
     ident = (identifier("PRN", "Provider number", "https://facility.ndhm.gov.in", h.hfr_id) if h.hfr_id
              else identifier("XX", "Organization identifier", local(h, "organization"), h.code))
@@ -91,7 +82,7 @@ def organization(h: Hospital) -> dict:
 
 def patient(p: Patient, h: Hospital) -> dict:
     ids = [identifier("MR", "Medical record number", local(h, "patient"), p.patient_code)]
-    if p.abha_verified and p.abha_number:  # unverified ABHA numbers are never exported
+    if p.abha_verified and p.abha_number:
         n = p.abha_number
         ids.append(identifier("ABHA", "Ayushman Bharat Health Account (ABHA) ID", "https://healthid.ndhm.gov.in",
                               f"{n[:2]}-{n[2:6]}-{n[6:10]}-{n[10:]}",
@@ -110,8 +101,6 @@ def practitioner(d: Doctor, h: Hospital) -> dict:
 
 
 class Builder:
-    """Builds the resources of one document; the Composition's sections then reference them."""
-
     def __init__(self, c: ClinicalContent, p: Patient, h: Hospital, author: Doctor, doctors: list[Doctor]):
         self.c, self.h, self.resources, self.encounter = c, h, [], None
         self.org, self.patient = organization(h), patient(p, h)
@@ -136,7 +125,6 @@ class Builder:
         return self.resources[-1]
 
     def subject(self, field: str = "subject") -> dict:
-        """The patient reference, plus the encounter when the document has one."""
         about = {field: ref(self.patient, self.patient["name"][0]["text"])}
         return {**about, "encounter": ref(self.encounter)} if self.encounter else about
 
@@ -162,10 +150,10 @@ class Builder:
                 for i, a in enumerate(self.c.allergies)]
 
     def observations(self, wellness: bool = False) -> list[dict]:
-        """Vital signs keep LOINC + UCUM coding (blood pressure becomes one panel); other observations stay as written."""
         when = iso(self.c.encounter["start"] if self.c.encounter else self.c.date)
         vitals = {o["key"]: o for o in self.c.observations if o.get("key") in VITAL_SIGNS and o.get("value") is not None}
-        quantity = lambda k: {"value": vitals[k]["value"], "unit": VITAL_SIGNS[k][2], "system": UCUM, "code": VITAL_SIGNS[k][2]}  # noqa: E731
+        def quantity(key: str) -> dict:
+            return {"value": vitals[key]["value"], "unit": VITAL_SIGNS[key][2], "system": UCUM, "code": VITAL_SIGNS[key][2]}
 
         def vital(key: str, name: str, loinc: str, **value) -> dict:
             profile = ("ObservationBodyMeasurement" if key in ("weight", "height") else "ObservationVitalSigns") \
@@ -211,10 +199,13 @@ class Builder:
         return result
 
     def orders(self) -> list[dict]:
-        requester = lambda doctor: ref(doctor, doctor["name"][0]["text"])  # noqa: E731
+        def requester(doctor_id) -> dict:
+            doctor = self.doctors.get(doctor_id, self.author)
+            return ref(doctor, doctor["name"][0]["text"])
+
         return [self.add("ServiceRequest", "order", i, "ServiceRequest", o["name"], status=o.get("status", "active"),
                          intent="order", priority=o.get("priority", "routine"), code={"text": o["name"]}, **self.subject(),
-                         authoredOn=iso(o.get("authored")), requester=requester(self.doctors.get(o.get("requester"), self.author)),
+                         authoredOn=iso(o.get("authored")), requester=requester(o.get("requester")),
                          note=[{"text": o["note"]}] if o.get("note") else None) for i, o in enumerate(self.c.orders)]
 
     def reports(self, orders: list[dict]) -> list[dict]:
@@ -253,10 +244,9 @@ class Builder:
                 for i, im in enumerate(self.c.immunizations)]
 
     def attachment(self, binary: bool = False) -> list[dict]:
-        """The original file: a Binary (prescriptions) or a DocumentReference."""
         if not (a := self.c.attachment):
             return []
-        if binary:  # Binary is not a DomainResource, so it has no narrative
+        if binary:
             self.resources.append({"resourceType": "Binary", "id": uid("binary", f"{self.c.key}/0"),
                                    "meta": {"profile": [NRCES + "Binary"]}, "contentType": a["content_type"], "data": a["data"]})
             return [self.resources[-1]]
@@ -276,7 +266,6 @@ LABELS = {"chief_complaint": "Chief complaint", "history": "History", "plan": "P
 
 
 def section(title: str, code: tuple | None, entries: list | None = None, text: str | None = None) -> dict | None:
-    """A Composition section; left out when it has neither entries nor text."""
     out = {"title": title, "code": {"coding": [{"system": SNOMED, "code": code[0], "display": code[1]}]} if code else None,
            "entry": [ref(e, typed=True) for e in entries or []], "text": narrative(text) if text else None}
     return {k: v for k, v in out.items() if v} if entries or text else None
@@ -284,7 +273,10 @@ def section(title: str, code: tuple | None, entries: list | None = None, text: s
 
 def build_sections(b: Builder) -> list[dict | None]:
     c, kind = b.c, b.c.record_type
-    text = lambda *keys: "\n".join(f"{LABELS[k]}: {c.text[k]}" for k in keys if c.text.get(k)) or None  # noqa: E731
+
+    def text(*keys: str) -> str | None:
+        return "\n".join(f"{LABELS[k]}: {c.text[k]}" for k in keys if c.text.get(k)) or None
+
     if kind in ("OPConsultRecord", "DischargeSummaryRecord"):
         op = kind == "OPConsultRecord"
         orders = b.orders() if op else []
@@ -303,7 +295,10 @@ def build_sections(b: Builder) -> list[dict | None]:
                 section("Document reference", COMPOSITION_TYPES[kind], b.attachment())]
     if kind == "WellnessRecord":
         observations = b.observations(wellness=True)
-        group = lambda end: [o for o in observations if o["meta"]["profile"][0].endswith(end)]  # noqa: E731
+
+        def group(end: str) -> list[dict]:
+            return [o for o in observations if o["meta"]["profile"][0].endswith(end)]
+
         return [section("Vital Signs", None, group("VitalSigns")), section("Body Measurement", None, group("BodyMeasurement")),
                 section("Other Observations", None, group("/Observation"), c.text.get("notes")),
                 section("Document Reference", None, b.attachment())]
@@ -317,7 +312,6 @@ def build_sections(b: Builder) -> list[dict | None]:
 
 
 def build_bundle(c: ClinicalContent, p: Patient, h: Hospital, author: Doctor, doctors=(), version: int = 1) -> dict:
-    """The document Bundle: Composition first, then every resource it (transitively) references."""
     b = Builder(c, p, h, author, list(doctors))
     sections = [s for s in build_sections(b) if s]
     kind = COMPOSITION_TYPES.get(c.record_type)

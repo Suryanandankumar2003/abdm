@@ -13,7 +13,6 @@ router = APIRouter(tags=["consultations"])
 
 
 def own_draft(db: Session, user: User, encounter_id: int, action: str) -> Encounter:
-    """A draft consultation that the current user (as its doctor) may change."""
     encounter = get_or_404(db, Encounter, encounter_id, user.hospital_id)
     if encounter.doctor_id != current_doctor(db, user).id:
         raise HTTPException(403, "Only the consulting doctor can change this consultation")
@@ -23,7 +22,6 @@ def own_draft(db: Session, user: User, encounter_id: int, action: str) -> Encoun
 
 @router.get("/terminology")
 def terminology(_: User = Depends(get_current_user)):
-    """Coded value lists used by the clinical forms (single source shared with the FHIR mapping)."""
     return {
         "vitals": [{"key": k, "label": label, "unit": unit, "min": low, "max": high}
                    for k, (label, _loinc, unit, low, high) in VITAL_SIGNS.items()],
@@ -111,7 +109,6 @@ def cancel_consultation(encounter_id: int, body: ReasonRequest, request: Request
 @router.patch("/conditions/{condition_id}", response_model=ConditionOut)
 def update_condition_status(condition_id: int, body: ConditionStatusUpdate, request: Request,
                             user: User = Depends(require("consultation:write")), db: Session = Depends(get_db)):
-    """Mark a diagnosis resolved/active later on; the rest of a finalized diagnosis stays unchanged."""
     current_doctor(db, user)
     condition = db.get(Condition, condition_id)
     if condition is None or condition.encounter.hospital_id != user.hospital_id:
@@ -127,7 +124,6 @@ def update_condition_status(condition_id: int, body: ConditionStatusUpdate, requ
 @router.get("/patients/{patient_id}/history", response_model=PatientHistory)
 def patient_history(patient_id: int, request: Request,
                     user: User = Depends(require("clinical:read")), db: Session = Depends(get_db)):
-    """Finalized clinical record of a patient: consultations, diagnoses, prescriptions and lab reports."""
     patient = get_or_404(db, Patient, patient_id, user.hospital_id)
     consultations = db.scalars(select(Encounter).where(
         Encounter.patient_id == patient.id, Encounter.status == "approved").order_by(Encounter.visit_at.desc())).all()

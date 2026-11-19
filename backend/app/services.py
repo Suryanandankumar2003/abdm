@@ -1,5 +1,3 @@
-"""Shared business logic used by more than one route."""
-
 import re
 from difflib import SequenceMatcher
 
@@ -13,7 +11,6 @@ from app.models import AuditLog, Doctor, Patient, User, utcnow
 def audit(db: Session, user: User | None, action: str, entity_type: str | None = None,
           entity_id=None, details: dict | None = None, request: Request | None = None,
           hospital_id: int | None = None) -> None:
-    """Add an audit entry to the current transaction (committed together with the change)."""
     db.add(AuditLog(
         hospital_id=hospital_id or (user.hospital_id if user else None),
         user_id=user.id if user else None,
@@ -32,14 +29,12 @@ def paginate(db: Session, query, page: int, page_size: int) -> dict:
 
 
 def commit(db: Session, obj):
-    """Commit the transaction and return `obj` reloaded from the database."""
     db.commit()
     db.refresh(obj)
     return obj
 
 
 def get_or_404(db: Session, model, entity_id: int, hospital_id: int):
-    """Fetch a row that belongs to the caller's hospital, or raise 404."""
     obj = db.get(model, entity_id)
     if obj is None or obj.hospital_id != hospital_id:
         raise HTTPException(404, f"{model.__name__} not found")
@@ -47,7 +42,6 @@ def get_or_404(db: Session, model, entity_id: int, hospital_id: int):
 
 
 def changed_fields(obj, data: dict) -> dict:
-    """Apply `data` to `obj` and return {field: [old, new]} for values that actually changed."""
     changes = {}
     for field, value in data.items():
         old = getattr(obj, field)
@@ -57,10 +51,7 @@ def changed_fields(obj, data: dict) -> dict:
     return changes
 
 
-# ---------- clinical workflow ----------
-
 def current_doctor(db: Session, user: User) -> Doctor:
-    """Doctor profile linked to the user; clinical authoring and approval require one."""
     doctor = db.scalar(select(Doctor).where(Doctor.user_id == user.id, Doctor.is_active.is_(True)))
     if doctor is None:
         raise HTTPException(403, "Your account is not linked to an active doctor profile")
@@ -79,8 +70,6 @@ def mark_approved(record, user: User) -> None:
     record.approved_at = utcnow()
 
 
-# ---------- patient duplicate detection ----------
-
 def _normalize_name(name: str) -> str:
     return " ".join(re.sub(r"[^a-z\s]", " ", name.lower()).split())
 
@@ -98,12 +87,6 @@ LEVEL_ORDER = {"exact": 0, "likely": 1, "possible": 2}
 def find_duplicate_patients(db: Session, hospital_id: int, *, full_name: str, gender: str, mobile: str,
                             year_of_birth: int | None, abha_number: str | None = None,
                             abha_address: str | None = None, exclude_id: int | None = None) -> list[dict]:
-    """Return possible existing registrations of the same person, strongest matches first.
-
-    exact:    same ABHA number or ABHA address (never allowed twice in one hospital)
-    likely:   same mobile and similar name
-    possible: similar name, same gender and year of birth within one year
-    """
     conditions = [Patient.mobile == mobile]
     if abha_number:
         conditions.append(Patient.abha_number == abha_number)

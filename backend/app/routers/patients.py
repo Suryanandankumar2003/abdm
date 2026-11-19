@@ -52,7 +52,6 @@ def search_patients(q: str | None = Query(None, description="Patient ID, name, m
         conditions = [Patient.full_name.ilike(f"%{term}%"), Patient.patient_code.ilike(f"%{term}%")]
         if digits.isdigit() and len(digits) >= 4:
             conditions.append(Patient.mobile.contains(digits[-10:]))
-        # ABHA identifiers are only searchable once verified, so unverified entries cannot be used to look people up.
         if digits.isdigit() and len(digits) == 14:
             conditions.append(and_(Patient.abha_number == digits, Patient.abha_verified.is_(True)))
         if "@" in term:
@@ -120,7 +119,6 @@ def update_patient(patient_id: int, body: PatientUpdate, request: Request,
     abha_changed = any(field in data and data[field] != getattr(patient, field) for field in ABHA_FIELDS)
     changes = changed_fields(patient, data)
     if abha_changed and patient.abha_verified:
-        # A changed identifier has not been verified, whatever the previous state was.
         patient.abha_verified = False
         patient.abha_verified_at = patient.abha_verified_by_id = patient.abha_verification_method = None
         changes["abha_verified"] = ["True", "False"]

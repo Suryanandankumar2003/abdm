@@ -1,13 +1,3 @@
-"""remove LOINC: the term_mappings table, lab_tests.loinc_code, lab_results.loinc_code and the loinc_code of each
-catalogue parameter
-
-Revision ID: 0006
-Revises: 0005
-Create Date: 2026-11-18 12:00:00.000000
-
-Laboratory tests and results are identified by name only. SQLite rebuilds lab_tests and lab_results for this (batch
-mode). The downgrade brings the columns and the table back empty: the removed codes are not restored.
-"""
 import json
 from typing import Sequence, Union
 

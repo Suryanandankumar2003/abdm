@@ -12,7 +12,6 @@ router = APIRouter(prefix="/doctors", tags=["doctors"])
 
 
 def validate_doctor(db: Session, hospital_id: int, data: dict, doctor_id: int | None = None) -> None:
-    """Check unique registration number and that a linked user is a free doctor account."""
     if data.get("registration_number") and db.scalar(select(Doctor.id).where(
             Doctor.hospital_id == hospital_id, Doctor.registration_number == data["registration_number"],
             Doctor.id != (doctor_id or 0))):

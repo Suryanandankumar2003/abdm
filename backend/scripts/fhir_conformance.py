@@ -1,9 +1,3 @@
-"""FHIR conformance report: build one bundle per ABDM record profile and validate it with the HL7 validator.
-
-Run from the backend folder:  python scripts\\fhir_conformance.py
-Uses synthetic content and transient (unsaved) registry objects; no database or patient data involved.
-"""
-
 import base64
 import sys
 from datetime import datetime
@@ -11,9 +5,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.fhir import FHIR_VERSION, IG_PACKAGE, ClinicalContent, build_bundle  # noqa: E402
-from app.models import Doctor, Hospital, Patient  # noqa: E402
-from app.routers.fhir import validate  # noqa: E402
+from app.fhir import FHIR_VERSION, IG_PACKAGE, ClinicalContent, build_bundle
+from app.models import Doctor, Hospital, Patient
+from app.routers.fhir import validate
 
 hospital = Hospital(id=1, name="Conformance Hospital", code="CNF", hfr_id="IN0000000001", city="Pune", state="Maharashtra",
                     pincode="411001", phone="+912012345678")
@@ -28,7 +22,7 @@ meds = [{"name": "Paracetamol 500 mg tablet", "dosage": "1 tablet", "route": "or
          "quantity": 9}]
 report = {"name": "Haemoglobin", "conclusion": "Mild anaemia", "issued": when, "effective": when, "interpreter": 1,
           "results": [{"name": "Haemoglobin", "value": "11.0", "value_num": 11.0, "unit": "g/dL", "ref_low": 12, "ref_high": 15,
-                       "interpretation": "L"}]}  # tests are identified by name only, as the application sends them
+                       "interpretation": "L"}]}
 vitals = [{"name": "Heart rate", "key": "pulse", "value": 80}, {"name": "Body weight", "key": "weight", "value": 62}]
 
 CASES = {

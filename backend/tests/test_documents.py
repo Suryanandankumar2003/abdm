@@ -1,5 +1,3 @@
-"""Phase 3: AI document extraction, review, approval and FHIR generation/validation."""
-
 import copy
 
 import pytest
@@ -36,7 +34,6 @@ def ai_output(document_type, **overrides):
 PRESCRIPTION = ai_output("prescription", medications=[
     {"name": f("Metformin 500 mg"), "dosage": f("1 tab"), "route": f("oral"), "frequency": f("1-0-1"),
      "duration": f("30 days"), "quantity": f("60"), "instructions": f("after food")},
-    # handwriting was hard to read: low confidence, must be reviewed
     {"name": f("Amlodipine 5 mg", 0.55, "Amlo...5"), "dosage": f("1 tab", 0.6), "route": f(), "frequency": f("OD", 0.5),
      "duration": f("1 week"), "quantity": f(), "instructions": f()}],
     diagnoses=[{"text": f("Type 2 diabetes mellitus"), "icd10_code": f()}])
@@ -52,7 +49,6 @@ FAKE_DOCUMENTS = {b"PRESCRIPTION": PRESCRIPTION, b"LAB": LAB}
 
 @pytest.fixture(autouse=True)
 def fake_ai(monkeypatch, tmp_path):
-    """No document leaves the machine in tests: the model call returns a fixed extraction per sample file."""
     monkeypatch.setattr(settings, "upload_dir", tmp_path)
     calls = []
 
@@ -87,7 +83,6 @@ def review(client, headers, doc, **changes):
 
 
 def accept_all(data):
-    """Staff accepts every low-confidence suggestion."""
     def walk(node):
         if isinstance(node, dict):
             if "review" in node and node.get("status") == "uncertain":
@@ -101,7 +96,6 @@ def accept_all(data):
     return data
 
 
-# 1. prescription extraction
 def test_prescription_extraction(client, fake_ai):
     hims = login(client, "hims")
     created = upload(client, hims, b"PRESCRIPTION\nRx Metformin 500 mg 1-0-1 x 30 days")
@@ -109,7 +103,7 @@ def test_prescription_extraction(client, fake_ai):
     doc = client.get(f"/api/documents/{created.json()['id']}", headers=hims).json()
     assert doc["extraction_status"] == "completed" and doc["document_type"] == "prescription"
     assert doc["text"].startswith("PRESCRIPTION")
-    assert fake_ai[0][0]["type"] == "text"  # TXT is sent as text; PDFs/images go as document/image blocks
+    assert fake_ai[0][0]["type"] == "text"
 
     meds = doc["data"]["medications"]
     assert meds[0]["name"] == {"value": "Metformin 500 mg", "confidence": 0.95, "evidence": "as printed",
@@ -126,13 +120,11 @@ def test_file_checks_and_failed_extraction(client):
     assert upload(client, hims, b"not a pdf", name="scan.pdf").status_code == 415
     assert client.get("/api/documents", headers=login(client, "reception")).status_code == 403
 
-    # When the model fails the document stays usable for manual entry.
     failed = client.get(f"/api/documents/{upload(client, hims, b'unreadable').json()['id']}", headers=hims).json()
     assert failed["extraction_status"] == "failed" and "declined" in failed["extraction_error"]
     assert failed["data"]["medications"] == [] and failed["data"]["patient"]["name"]["source"] == "manual"
 
 
-# 2. laboratory report extraction: results are identified by test name only (no LOINC mapping)
 def test_lab_report_extraction(client):
     lab = login(client, "labtech")
     doc = client.get(f"/api/documents/{upload(client, lab, b'LAB REPORT').json()['id']}", headers=lab).json()
@@ -141,18 +133,16 @@ def test_lab_report_extraction(client):
     assert hb["value"]["value"] == "10.5" and hb["reference_range"]["value"] == "12-17"
     assert "loinc" not in hb and not any("LOINC" in r for r in doc["requirements"])
 
-    # The LOINC endpoints are gone.
     assert client.post(f"/api/documents/{doc['id']}/lab-results/0/loinc", headers=lab,
                        json={"action": "confirm"}).status_code == 404
     assert client.get("/api/terminology/loinc/suggest", params={"q": "S. Creatinine"}, headers=lab).status_code == 404
 
 
-# 3. manual correction keeps provenance honest
 def test_manual_correction(client):
     hims = login(client, "hims")
     doc = client.get(f"/api/documents/{upload(client, hims, b'PRESCRIPTION').json()['id']}", headers=hims).json()
     data = doc["data"]
-    data["medications"][1]["name"]["value"] = "Amlodipine 5 mg tablet"  # corrected, though still labelled "ai"
+    data["medications"][1]["name"]["value"] = "Amlodipine 5 mg tablet"
     data["medications"][1]["frequency"]["review"] = "rejected"
     data["medications"][0]["name"]["review"] = "accepted"
     data["allergies"].append({"substance": {"value": "Sulfa drugs"}, "reaction": {"value": None}})
@@ -160,13 +150,12 @@ def test_manual_correction(client):
     meds = saved["data"]["medications"]
     assert meds[1]["name"]["source"] == "manual" and meds[1]["name"]["review"] == "edited"
     assert meds[1]["name"]["confidence"] is None and meds[1]["name"]["status"] == "extracted"
-    assert meds[1]["frequency"]["status"] == "missing"  # rejected suggestions count as absent
+    assert meds[1]["frequency"]["status"] == "missing"
     assert meds[0]["name"] == {**meds[0]["name"], "source": "ai", "review": "accepted"}
     assert saved["data"]["allergies"][0]["substance"]["source"] == "manual"
     assert saved["review_counts"]["manual"] == 2 and saved["patient"]["full_name"] == "Ramesh Kumar"
 
 
-# 4 + 6 + 7. human approval, FHIR resources and Bundle
 def test_human_approval_generates_fhir(client):
     hims, doctor, lab = login(client, "hims"), login(client, "dr.mehta"), login(client, "labtech")
     doc = client.get(f"/api/documents/{upload(client, hims, b'PRESCRIPTION').json()['id']}", headers=hims).json()
@@ -179,7 +168,7 @@ def test_human_approval_generates_fhir(client):
                  data=accept_all(doc["data"])).json()
     assert doc["requirements"] == [] and doc["warnings"] == []
     assert client.post(f"/api/documents/{doc['id']}/submit", headers=hims).json()["status"] == "pending_approval"
-    assert review(client, hims, doc, document_type="other").status_code == 409  # locked while awaiting approval
+    assert review(client, hims, doc, document_type="other").status_code == 409
     assert client.post(f"/api/documents/{doc['id']}/approve", headers=lab).status_code == 403
     approved = client.post(f"/api/documents/{doc['id']}/approve", headers=doctor).json()
     assert approved["status"] == "approved" and approved["approved_by_name"] == "Dr. Anil Mehta"
@@ -201,7 +190,7 @@ def test_human_approval_generates_fhir(client):
     dosage = metformin["dosageInstruction"][0]
     assert dosage["timing"]["repeat"]["frequency"] == 2 and dosage["timing"]["repeat"]["boundsDuration"]["value"] == 30
     assert dosage["route"]["coding"][0]["code"] == "26643006" and metformin["dispenseRequest"]["quantity"]["value"] == 60
-    assert "route" not in amlodipine["dosageInstruction"][0]  # not documented, so not invented
+    assert "route" not in amlodipine["dosageInstruction"][0]
     assert amlodipine["dosageInstruction"][0]["timing"]["repeat"]["boundsDuration"]["value"] == 7
 
     assert review(client, hims, approved, document_type="other").status_code == 409
@@ -224,7 +213,6 @@ def test_rejection_returns_to_review(client):
     assert review(client, hims, rejected, document_type="prescription").json()["status"] == "draft"
 
 
-# 9. missing required fields
 def test_missing_required_fields(client):
     lab = login(client, "labtech")
     doc = client.get(f"/api/documents/{upload(client, lab, b'LAB REPORT').json()['id']}", headers=lab).json()
@@ -232,7 +220,6 @@ def test_missing_required_fields(client):
     doc = review(client, lab, doc, document_type="discharge_summary").json()
     assert "Enter the admission date as YYYY-MM-DD" in doc["requirements"]
 
-    # The engine still reports what a bundle lacks when the source data is incomplete.
     from app.database import SessionLocal
     from app.fhir import ClinicalContent, build_bundle
     from app.models import Doctor, Hospital, Patient
@@ -245,10 +232,9 @@ def test_missing_required_fields(client):
     messages = [i["message"] for i in fhir.prechecks(bundle)]
     assert "DiagnosticReport (CBC) needs a conclusion" in messages
     assert "DiagnosticReport (CBC) needs an approving doctor (results interpreter)" in messages
-    assert fhir.prechecks(op) == []  # a missing visit date is caught earlier, by the document review requirements
+    assert fhir.prechecks(op) == []
 
 
-# 10. invalid resource references
 def test_invalid_references(client):
     hims = login(client, "hims")
     rx = client.post("/api/fhir/records", headers=hims, json={"source_type": "prescription", "source_id": 999})
@@ -270,7 +256,6 @@ def test_invalid_references(client):
 
 
 def test_phase2_records_become_fhir_records(client):
-    """Approved consultations/prescriptions/lab reports reuse the same engine."""
     from tests.test_clinical import MEDICINES, start_consultation
     doctor, hims = login(client, "dr.mehta"), login(client, "hims")
     consult = start_consultation(client, doctor, first_patient(client, doctor)["id"])
@@ -283,13 +268,12 @@ def test_phase2_records_become_fhir_records(client):
     assert record["record_type"] == "OPConsultRecord"
     conditions = [e["resource"] for e in record["bundle"]["entry"] if e["resource"]["resourceType"] == "Condition"]
     assert conditions[0]["code"]["coding"][0]["display"] == "Type 2 diabetes mellitus without complications"
-    assert "coding" not in conditions[1]["code"]  # unverifiable code: text only, with a warning
+    assert "coding" not in conditions[1]["code"]
     assert any("Z99.99 could not be verified" in i["message"] for i in record["prechecks"])
     listing = client.get("/api/fhir/records", headers=hims).json()
     assert listing["total"] == 1 and listing["items"][0]["hip_eligible"] is False
 
 
-# 8. ABDM profile validation with the official HL7 validator (about a minute per bundle)
 @needs_validator
 def test_hl7_profile_validation(client):
     hims, doctor = login(client, "hims"), login(client, "dr.mehta")
@@ -304,14 +288,13 @@ def test_hl7_profile_validation(client):
     assert validated["validation_status"] == "valid", errors
     assert validated["hip_eligible"] is True and "ndhm.in#6.5.0" in validated["validator"]
 
-    # A bundle that breaks the profile is reported in plain language at the right resource.
     broken = copy.deepcopy(validated["bundle"])
     medication = next(e["resource"] for e in broken["entry"] if e["resource"]["resourceType"] == "MedicationRequest")
     del medication["requester"], medication["authoredOn"]
     status, issues, _ = fhir.validate(broken)
     assert status == "invalid"
     located = [i for i in issues if i["severity"] == "error" and (i["location"] or "").startswith("MedicationRequest")]
-    assert located  # reported at the MedicationRequest, in plain language
+    assert located
 
 
 @needs_validator
@@ -319,7 +302,7 @@ def test_hl7_validation_of_lab_report_identified_by_name(client):
     lab, doctor = login(client, "labtech"), login(client, "dr.rao")
     doc = client.get(f"/api/documents/{upload(client, lab, b'LAB REPORT').json()['id']}", headers=lab).json()
     data = doc["data"]
-    data["report_conclusion"] = {"value": "Mild anaemia with thrombocytosis"}  # entered by staff
+    data["report_conclusion"] = {"value": "Mild anaemia with thrombocytosis"}
     doc = review(client, lab, doc, patient_id=first_patient(client, lab)["id"], author_doctor_id=doctor_id(client, doctor),
                  data=data).json()
     assert doc["requirements"] == [], doc["requirements"]
@@ -329,7 +312,7 @@ def test_hl7_validation_of_lab_report_identified_by_name(client):
     report = next(e["resource"] for e in record["bundle"]["entry"] if e["resource"]["resourceType"] == "DiagnosticReport")
     observations = [e["resource"] for e in record["bundle"]["entry"] if e["resource"]["resourceType"] == "Observation"]
     assert report["code"]["text"] == "CBC" and report["resultsInterpreter"][0]["display"] == "Dr. Sunita Rao"
-    assert observations[0]["code"] == {"text": "Haemoglobin"}  # the ABDM lab profiles allow a name without a code
+    assert observations[0]["code"] == {"text": "Haemoglobin"}
     assert observations[0]["referenceRange"][0] == {"low": {"value": 12.0, "unit": "g/dL"}, "high": {"value": 17.0, "unit": "g/dL"}}
     assert [o["interpretation"][0]["coding"][0]["code"] for o in observations] == ["L", "H"]
 

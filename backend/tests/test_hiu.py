@@ -1,6 +1,3 @@
-"""ABDM HIU with a simulated consent manager: consent requests, the patient's decision, artefact checks, encrypted
-retrieval, sealed storage, retention and revocation."""
-
 import uuid
 from datetime import date, timedelta
 
@@ -28,7 +25,7 @@ def verified_patient(client):
     patient = client.get("/api/patients?q=ramesh", headers=hims).json()["items"][0]
     client.patch(f"/api/patients/{patient['id']}", headers=login(client, "reception"), json={"abha_address": "ramesh.k@sbx"})
     register_abha(client, hims, patient, "ramesh.k@sbx")
-    client.post(f"/api/hip/patients/{patient['id']}/link-token", headers=hims)  # ABDM verifies the ABHA address
+    client.post(f"/api/hip/patients/{patient['id']}/link-token", headers=hims)
     return client.get(f"/api/patients/{patient['id']}", headers=hims).json()
 
 
@@ -47,16 +44,16 @@ def test_complete_hiu_workflow(client):
     patient = verified_patient(client)
     assert patient["abha_verified"] and patient["abha_verification_method"] == "abdm_link_token"
 
-    request = submit(client, doctor, patient).json()  # staff decide what to ask; the patient decides on consent
+    request = submit(client, doctor, patient).json()
     assert request["status"] == "pending_consent"
-    granted = decide(client, doctor, request, grant=True, hi_types=["DiagnosticReport"]).json()  # only lab reports
+    granted = decide(client, doctor, request, grant=True, hi_types=["DiagnosticReport"]).json()
     assert granted["status"] == "received" and granted["status_message"].startswith("2 record(s)")
     detail = client.get(f"/api/hiu/requests/{request['id']}", headers=hims).json()
     [artefact] = detail["artefacts"]
     assert artefact["status"] == "valid" and artefact["hi_types"] == ["DiagnosticReport"] and artefact["hip_id"] == "SIM_EXT_HIP_01"
     assert detail["requester"] == "Dr. Anil Mehta" and detail["data_requests"][0]["status"] == "received"
 
-    with SessionLocal() as db:  # only consented, in-range records; sealed at rest, kept exactly as received
+    with SessionLocal() as db:
         rows = db.query(RetrievedRecord).all()
         assert len(rows) == 2 and {r.category for r in rows} == {"Lab report"}
         assert all(r.checksum_ok and "HbA1c" not in r.content for r in rows)
@@ -71,7 +68,7 @@ def test_complete_hiu_workflow(client):
     assert [p["value"] for p in trend["points"]] == [8.1, 7.2] and len(view["timeline"]) == 2
     one = client.get(f"/api/hiu/records/{view['records'][0]['id']}", headers=doctor).json()
     assert one["facts"]["reports"][0]["name"] == "HbA1c" and one["original"]["entry"][0]["resource"]["resourceType"] == "Composition"
-    assert client.get(f"/api/hiu/patients/{patient['id']}/records", headers=hims).status_code == 403  # no clinical access
+    assert client.get(f"/api/hiu/patients/{patient['id']}/records", headers=hims).status_code == 403
     assert client.get("/api/hiu/requests", headers=login(client, "reception")).status_code == 403
     audit = client.get("/api/audit-logs?action=hiu.record", headers=login(client, "admin", "Admin1234")).json()
     assert {i["action"] for i in audit["items"]} == {"hiu.records_view", "hiu.record_view"}
@@ -87,7 +84,7 @@ def test_request_rules(client):
     patient = verified_patient(client)
     assert submit(client, doctor, patient, hi_types=["Everything"]).status_code == 422
     assert submit(client, doctor, patient, date_from="2030-01-01", date_to="2031-01-01").status_code == 422
-    assert submit(client, hims, patient).status_code == 403  # no doctor profile: must name the requesting doctor
+    assert submit(client, hims, patient).status_code == 403
     on_behalf = submit(client, hims, patient, requester_doctor_id=2).json()
     assert client.get(f"/api/hiu/requests/{on_behalf['id']}", headers=hims).json()["requester"] == "Dr. Sunita Rao"
 
@@ -97,7 +94,7 @@ def test_denied_consent_stops_everything(client):
     request = submit(client, doctor, verified_patient(client)).json()
     denied = decide(client, doctor, request, grant=False, reason="Not now").json()
     assert denied["status"] == "denied" and "Not now" in denied["status_message"]
-    assert decide(client, doctor, request, grant=True).status_code == 409  # decided already
+    assert decide(client, doctor, request, grant=True).status_code == 409
     assert client.get(f"/api/hiu/requests/{request['id']}", headers=doctor).json()["artefacts"] == []
     with SessionLocal() as db:
         assert db.query(RetrievedRecord).count() == 0
@@ -109,7 +106,7 @@ def test_revocation_and_expiry_erase_records(client):
     request = submit(client, doctor, patient).json()
     decide(client, doctor, request, grant=True)
     with SessionLocal() as db:
-        assert db.query(RetrievedRecord).count() == 3  # 2 lab reports + 1 prescription in range
+        assert db.query(RetrievedRecord).count() == 3
     revoked = client.post(f"/api/hiu/simulate/requests/{request['id']}/revoke", headers=doctor).json()
     assert revoked["status"] == "revoked"
     assert client.get(f"/api/hiu/patients/{patient['id']}/records", headers=doctor).json()["records"] == []
@@ -118,7 +115,7 @@ def test_revocation_and_expiry_erase_records(client):
     decide(client, doctor, second, grant=True)
     with SessionLocal() as db:
         for row in db.query(RetrievedRecord).all():
-            row.erase_at = utcnow() - timedelta(minutes=1)  # dataEraseAt has passed
+            row.erase_at = utcnow() - timedelta(minutes=1)
         db.commit()
     assert client.get(f"/api/hiu/patients/{patient['id']}/records", headers=doctor).json()["records"] == []
 
@@ -132,7 +129,7 @@ def test_artefact_and_data_rules(client):
                 "purpose": {"code": "CAREMGT"}, "careContexts": [{"careContextReference": "c"}],
                 "permission": {"dateRange": {"from": "2024-06-01T00:00:00Z", "to": f"{TODAY}T10:00:00Z"},
                                "dataEraseAt": "2099-01-01T00:00:00Z"}}
-        accept = lambda **change: hiu.accept_artefact(db, request, {**good, "consentId": str(uuid.uuid4()), **change}, "H")  # noqa: E731
+        accept = lambda **change: hiu.accept_artefact(db, request, {**good, "consentId": str(uuid.uuid4()), **change}, "H")
         artefact = accept()
         assert artefact.status == "valid"
         cases = {"it is for a different HIU": {"hiu": {"id": "OTHER"}},
@@ -145,7 +142,7 @@ def test_artefact_and_data_rules(client):
         for message, change in cases.items():
             assert accept(**change).status_message == f"Artefact not accepted: {message}"
 
-        db.flush()  # a provider's answer: entries outside the consent are refused, never stored; errors are kept
+        db.flush()
         foreign = {"transactionId": "t", "keyMaterial": {"dhPublicKey": {"keyValue": "AA=="}, "nonce": "AA=="},
                    "entries": [{"careContextReference": "NOT-IN-CONSENT", "content": "x", "checksum": "y"}]}
         received = hiu.request_data(db, artefact, lambda keys: foreign)

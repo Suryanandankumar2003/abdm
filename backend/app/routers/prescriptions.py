@@ -10,11 +10,8 @@ from app.services import audit, commit, current_doctor, get_or_404, mark_approve
 
 router = APIRouter(prefix="/prescriptions", tags=["prescriptions"])
 
-# draft/rejected -> (submit) pending_approval -> (approve) approved | (reject) rejected; any open state -> cancelled
-
 
 def own_prescription(db: Session, user: User, prescription_id: int, *allowed: str, action: str) -> Prescription:
-    """Prescription in one of the `allowed` states that belongs to the current user's doctor profile."""
     prescription = get_or_404(db, Prescription, prescription_id, user.hospital_id)
     if prescription.doctor_id != current_doctor(db, user).id:
         raise HTTPException(403, "Only the prescribing doctor can change or approve this prescription")

@@ -1,12 +1,3 @@
-"""remove ABDM tables that are no longer used: hip_transactions (the ABDM transaction log), hip_link_requests
-(OTPs of patient-initiated linking) and hiu_patient_summaries (AI summaries of retrieved records)
-
-Revision ID: 0007
-Revises: 0006
-Create Date: 2026-11-19 12:00:00.000000
-
-The downgrade brings the tables back empty: the removed rows are not restored.
-"""
 from typing import Sequence, Union
 
 from alembic import op
@@ -22,7 +13,7 @@ TRANSACTION_INDEXES = ['consent_id', 'created_at', 'hospital_id', 'kind', 'reque
 
 
 def upgrade() -> None:
-    op.drop_table('hip_transactions')  # its indexes go with it
+    op.drop_table('hip_transactions')
     op.drop_table('hip_link_requests')
     op.drop_table('hiu_patient_summaries')
 

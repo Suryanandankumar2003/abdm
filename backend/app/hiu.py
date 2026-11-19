@@ -1,12 +1,3 @@
-"""ABDM Health Information User (HIU): this hospital requests and receives patients' records from other providers.
-
-The consent manager and the patient's ABHA app are simulated (app.routers.hiu), so each step is a direct call:
-1. create_consent_request(): staff ask for record types, dates and a purpose, for a patient with an ABDM-verified ABHA;
-2. the patient grants (perhaps fewer types) or denies; each provider's consent artefact goes through accept_artefact();
-3. request_data(): with fresh keys per request, the provider's encrypted records are decrypted, checked and stored
-   sealed (encrypted at rest) until the consent's dataEraseAt, or until the patient revokes the consent.
-"""
-
 import base64
 import hashlib
 import json
@@ -36,15 +27,11 @@ CATEGORIES = {record_type: hip.HI_LABELS[hi_type] for record_type, hi_type in hi
 
 
 class HiuError(Exception):
-    """A request the HIU refuses; the message is shown to staff."""
+    pass
 
-
-# ---------- sealing: received records are encrypted at rest ----------
-# "v2.<key id>.<base64(nonce + AES-GCM ciphertext)>": the key id names the RECORD_SEALING_KEY used, so keys can be rotated
-# (old keys stay readable via RECORD_SEALING_OLD_KEYS). Values without a prefix use the legacy key from JWT_SECRET.
 
 class SealingKeyMissing(RuntimeError):
-    """A sealed value names a key that is not configured."""
+    pass
 
 
 def _derive(secret: str, salt: bytes, info: bytes) -> bytes:
@@ -62,7 +49,7 @@ def active_key_id() -> str | None:
 
 def seal(text: str) -> str:
     nonce = os.urandom(12)
-    if not settings.record_sealing_key:  # legacy mode: unchanged format and key
+    if not settings.record_sealing_key:
         key = _derive(settings.jwt_secret, b"abdm-hospital-hiu-storage", b"v1")
         return base64.b64encode(nonce + AESGCM(key).encrypt(nonce, text.encode(), None)).decode()
     key_id, key = _sealing_key(settings.record_sealing_key)
@@ -83,12 +70,9 @@ def unseal(sealed: str) -> str:
 
 
 def needs_reseal(sealed: str) -> bool:
-    """True when `sealed` is not encrypted with the active key (scripts/reseal_records.py moves it)."""
     key_id = active_key_id()
     return key_id is not None and not sealed.startswith(f"v2.{key_id}.")
 
-
-# ---------- reading received FHIR bundles (facts are copied, never inferred) ----------
 
 def _text(concept: dict | None) -> str | None:
     return (concept or {}).get("text") or next((c["display"] for c in (concept or {}).get("coding", []) if c.get("display")), None)
@@ -98,7 +82,7 @@ def _code(concept: dict | None, system: str) -> str | None:
     return next((c.get("code") for c in (concept or {}).get("coding", []) if c.get("system", "").endswith(system)), None)
 
 
-def _time(value: str | None) -> datetime:  # for sorting; datetime.min when missing or partial (e.g. "2024")
+def _time(value: str | None) -> datetime:
     try:
         return hip.parse_time(value) or datetime.min
     except ValueError:
@@ -110,13 +94,17 @@ def bundle_json(record: RetrievedRecord) -> dict:
 
 
 def describe(bundle: dict) -> dict:
-    """The facts of a received document, shown to doctors and used by the assistant."""
     resources = [e.get("resource", {}) for e in bundle.get("entry", [])]
-    of = lambda kind: [r for r in resources if r.get("resourceType") == kind]  # noqa: E731
+
+    def of(kind: str) -> list[dict]:
+        return [r for r in resources if r.get("resourceType") == kind]
+
+    def narrative(r: dict) -> str:
+        return " ".join(re.sub(r"<[^>]+>", " ", (r.get("text") or {}).get("div", "")).split())
+
     composition = (of("Composition") or [{}])[0]
     profile = ((composition.get("meta") or {}).get("profile") or [""])[0].rsplit("/", 1)[-1]
     kind, when = profile if profile in CATEGORIES else None, composition.get("date")
-    narrative = lambda r: " ".join(re.sub(r"<[^>]+>", " ", (r.get("text") or {}).get("div", "")).split())  # noqa: E731
     observations = []
     for o in of("Observation"):
         quantity, ref = o.get("valueQuantity") or {}, (o.get("referenceRange") or [{}])[0]
@@ -144,8 +132,9 @@ def describe(bundle: dict) -> dict:
 
 
 def timeline(records: list[tuple[int, dict]]) -> list[dict]:
-    """[(record id, describe() facts)] -> one entry per record, newest first."""
-    names = lambda items, key, n: [i[key] for i in items if i[key]][:n]  # noqa: E731
+    def names(items: list[dict], key: str, n: int) -> list[str]:
+        return [i[key] for i in items if i[key]][:n]
+
     entries = [{"record_id": rid, "date": f["date"], "category": f["category"], "source": f["source"], "highlights":
                 names(f["conditions"], "text", 3) + names(f["medications"], "name", 3) + names(f["reports"], "name", 2)}
                for rid, f in records]
@@ -153,8 +142,6 @@ def timeline(records: list[tuple[int, dict]]) -> list[dict]:
 
 
 def lab_trends(records: list[tuple[int, dict]]) -> list[dict]:
-    """Laboratory tests seen more than once. Values are compared only for the same test (LOINC code, else the exact
-    name) in one unit; otherwise the repeat is listed without comparison."""
     groups: dict[tuple, dict] = {}
     for rid, f in records:
         for o in f["observations"]:
@@ -171,8 +158,6 @@ def lab_trends(records: list[tuple[int, dict]]) -> list[dict]:
                        "note": None if comparable else "Not compared: units differ or values are not numeric"})
     return sorted(trends, key=lambda t: t["test"].lower())
 
-
-# ---------- consent request, artefacts and the health information ----------
 
 def create_consent_request(db: Session, user: User, patient: Patient, doctor: Doctor, purpose: str, hi_types: list[str],
                            date_from: datetime, date_to: datetime, erase_at: datetime, reason: str | None) -> HiuConsentRequest:
@@ -199,8 +184,6 @@ def create_consent_request(db: Session, user: User, patient: Patient, doctor: Do
 
 
 def accept_artefact(db: Session, request: HiuConsentRequest, detail: dict, source: str) -> HiuConsentArtefact:
-    """Store a consent artefact the patient granted. It is valid only if it is for this hospital's HIU and this patient,
-    and exactly within what was asked (types, purpose, dates), and not yet expired."""
     permission, dates = detail["permission"], detail["permission"]["dateRange"]
     start, end, erase_at = hip.parse_time(dates["from"]), hip.parse_time(dates["to"]), hip.parse_time(permission["dataEraseAt"])
     checks = [(detail["hiu"]["id"] == hip.hiu_id(request.hospital), "it is for a different HIU"),
@@ -221,8 +204,6 @@ def accept_artefact(db: Session, request: HiuConsentRequest, detail: dict, sourc
 
 
 def request_data(db: Session, artefact: HiuConsentArtefact, send) -> HiuDataRequest:
-    """Ask the provider for an artefact's records: send(keys) delivers this request's public key and nonce to the HIP and
-    returns its answer. The private key never leaves this function; only consented, decryptable Bundles are stored."""
     request, keys = artefact.consent_request, hip.new_keys()
     data_request = HiuDataRequest(artefact_id=artefact.id, request_id=str(uuid.uuid4()), push_token=secrets.token_urlsafe(32),
                                   status="requested", expires_at=utcnow() + timedelta(hours=24), pages_expected=1)
@@ -241,7 +222,7 @@ def request_data(db: Session, artefact: HiuConsentArtefact, send) -> HiuDataRequ
             content = hip.decrypt(entry["content"], keys, material["dhPublicKey"]["keyValue"], material["nonce"])
             if (bundle := json.loads(content)).get("resourceType") != "Bundle":
                 raise ValueError("content is not a FHIR Bundle")
-        except Exception:  # anything undecryptable, invalid or not consented is refused, never stored
+        except Exception:
             refused += 1
             continue
         facts, stored = describe(bundle), stored + 1
@@ -259,14 +240,12 @@ def request_data(db: Session, artefact: HiuConsentArtefact, send) -> HiuDataRequ
 
 
 def enforce_retention(db: Session) -> None:
-    """Erase received records whose consent has passed its dataEraseAt."""
     for row in db.scalars(select(RetrievedRecord).where(RetrievedRecord.erase_at <= utcnow())):
         db.delete(row)
     db.commit()
 
 
 def validate_record(record_id: int) -> None:
-    """HL7 FHIR validation of a received bundle."""
     with SessionLocal() as db:
         if row := db.get(RetrievedRecord, record_id):
             row.validation_status, row.validation_issues, _ = validate(bundle_json(row))

@@ -10,11 +10,6 @@ from app.services import audit, commit, current_doctor, get_or_404, mark_approve
 
 router = APIRouter(prefix="/lab", tags=["laboratory"])
 
-# Order: ordered -> sample_collected -> in_progress -> completed, or cancelled before results exist.
-# Report: draft/rejected -> pending_approval -> approved (order completed) | rejected.
-
-
-# ---------- catalogue ----------
 
 @router.get("/tests", response_model=list[LabTestOut])
 def list_tests(q: str | None = None, active_only: bool = False,
@@ -49,11 +44,8 @@ def create_test(body: LabTestIn, request: Request, user: User = Depends(require(
 @router.put("/tests/{test_id}", response_model=LabTestOut)
 def update_test(test_id: int, body: LabTestIn, request: Request, user: User = Depends(require("lab:catalog")),
                 db: Session = Depends(get_db)):
-    # Existing results keep their own copy of names, units and ranges, so editing is safe.
     return save_test(db, user, get_or_404(db, LabTest, test_id, user.hospital_id), body, request, "lab_test.update")
 
-
-# ---------- orders and samples ----------
 
 @router.get("/orders", response_model=Page[LabOrderOut])
 def list_orders(status: str | None = None, patient_id: int | None = None, encounter_id: int | None = None,
@@ -127,7 +119,6 @@ def collect_sample(order_id: int, body: SampleCollect, request: Request, user: U
 @router.post("/orders/{order_id}/sample/reject", response_model=LabOrderOut)
 def reject_sample(order_id: int, body: ReasonRequest, request: Request, user: User = Depends(require("lab:sample")),
                   db: Session = Depends(get_db)):
-    """Unusable sample (haemolysed, insufficient...): the order goes back to waiting for a new sample."""
     order = get_or_404(db, LabOrder, order_id, user.hospital_id)
     require_status(order, "sample_collected", action="reject sample")
     order.status, order.sample_status, order.sample_notes = "ordered", "rejected", body.reason
@@ -136,10 +127,7 @@ def reject_sample(order_id: int, body: ReasonRequest, request: Request, user: Us
     return order
 
 
-# ---------- results and report ----------
-
 def interpret(parameter: dict, numeric: float | None, manual: str | None) -> str | None:
-    """Flag numeric values against the reference range; otherwise keep the technician's flag."""
     low, high = parameter.get("ref_low"), parameter.get("ref_high")
     if numeric is None or (low is None and high is None):
         return manual
@@ -206,7 +194,7 @@ def submit_report(order_id: int, request: Request, user: User = Depends(require(
     missing = [p["name"] for p in order.test.parameters if p["code"] not in entered]
     if missing:
         raise HTTPException(422, f"Enter all results before submitting. Missing: {', '.join(missing)}")
-    if not report.conclusion:  # DiagnosticReport.conclusion is mandatory in the ABDM profile
+    if not report.conclusion:
         raise HTTPException(422, "Enter a conclusion before submitting the report")
     report.status, report.status_reason = "pending_approval", None
     audit(db, user, "lab_report.submit", "lab_order", order.id, request=request)

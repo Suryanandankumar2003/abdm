@@ -12,7 +12,6 @@ router = APIRouter(prefix="/hospital", tags=["hospital"])
 
 
 def check_unique_ids(db: Session, data: dict, hospital_id: int | None) -> None:
-    """HFR, HIP and HIU IDs identify one hospital each (hospital_id: the hospital being changed, None if new)."""
     for field, label in (("hfr_id", "HFR ID"), ("abdm_hip_id", "ABDM HIP ID"), ("abdm_hiu_id", "ABDM HIU ID")):
         column = getattr(Hospital, field)
         if data.get(field) and db.scalar(select(Hospital.id).where(column == data[field], Hospital.id != (hospital_id or 0))):

@@ -1,22 +1,3 @@
-"""Give the demo network (python init_db.py --demo) records to exchange through ABDM, so the HIP/HIU workflow
-between its hospitals can be seen end to end. Simulation mode only.
-
-For each visit below, the hospital's own staff work through the normal API exactly as in the app: the doctor
-records and finalizes a consultation and approves a prescription, the lab enters results that another doctor
-approves, and health information staff generate the FHIR documents. The documents are checked with the official
-HL7 FHIR validator (about a minute each; several run in parallel), and only valid ones become care contexts.
-Finally each hospital verifies every demo patient's ABHA address with (simulated) ABDM and links the care
-contexts to it, which is what makes them discoverable by the other hospitals.
-
-After it, sign in at another hospital (e.g. admin at City General Hospital), open External records (ABDM HIU),
-request records for Surya Prakash (surya@abdm) and use "Simulate: patient grants": the records arrive from
-Green Valley and Riverside, each hospital's ABDM HIP page shows the consent and the transfer.
-
-Usage (from backend/, with the venv active, after python init_db.py --demo):
-    python scripts/seed_shared_records.py              # safe to run again: completed visits are skipped
-    python scripts/seed_shared_records.py --workers 2  # fewer validator processes in parallel (less memory)
-"""
-
 import argparse
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -24,19 +5,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import inspect, select  # noqa: E402
+from fastapi.testclient import TestClient
+from sqlalchemy import inspect, select
 
-from app import demo  # noqa: E402
-from app.config import settings  # noqa: E402
-from app.database import SessionLocal  # noqa: E402
-from app.main import app  # noqa: E402
-from app.models import Encounter, FhirRecord, Hospital, Patient, User, utcnow  # noqa: E402
-from app.routers.fhir import validate, validator_available  # noqa: E402
-from app.services import audit  # noqa: E402
-from init_db import DEMO_PASSWORD  # noqa: E402
+from app import demo
+from app.config import settings
+from app.database import SessionLocal
+from app.main import app
+from app.models import Encounter, FhirRecord, Hospital, Patient, User, utcnow
+from app.routers.fhir import validate, validator_available
+from app.services import audit
+from init_db import DEMO_PASSWORD
 
-# Usernames per hospital; the primary hospital uses init_db.seed_demo's accounts.
 TEAM = {
     demo.PRIMARY: {"hims": "hims", "labtech": "labtech"},
     "GVH": {"hims": "gvh.hims", "labtech": "gvh.labtech"},
@@ -52,7 +32,6 @@ HYPERTENSION = {"display": "Essential (primary) hypertension", "code": "I10", "v
 DIABETES = {"display": "Type 2 diabetes mellitus", "code": "E11.9", "verification_status": "confirmed"}
 VIRAL = {"display": "Viral infection, unspecified", "code": "B34.9", "verification_status": "provisional"}
 
-# (hospital, ABHA address, doctor, lab approver, consultation, medicines, (test code, results, conclusion))
 VISITS = [
     ("GVH", "surya@abdm", "gvh.shetty", "gvh.kulkarni",
      {"chief_complaint": "Chest discomfort on climbing stairs", "vitals": {"pulse": 88, "systolic_bp": 148, "diastolic_bp": 94},
@@ -80,13 +59,10 @@ VISITS = [
 
 
 class Api:
-    """The app's own API, in process, signed in as the hospital's staff."""
-
     def __init__(self):
         self.client, self.tokens = TestClient(app), {}
 
     def can_sign_in(self, username: str) -> bool:
-        """True if the demo password still works (not changed, no two-step sign-in) for this account."""
         if username not in self.tokens:
             r = self.client.post("/api/auth/login", json={"username": username, "password": DEMO_PASSWORD})
             self.client.cookies.clear()
@@ -121,7 +97,6 @@ def patient_at(db, hospital: Hospital, address: str) -> Patient | None:
 
 def record_visit(api: Api, code: str, patient: Patient, doctor: str, approver: str, consultation: dict,
                  medicines: list[dict], lab: tuple) -> list[tuple[str, int]]:
-    """One outpatient visit through the API. Returns the FHIR sources created: [(source type, id)]."""
     labtech = TEAM[code]["labtech"]
     visit = api("POST", "/consultations", doctor, {"patient_id": patient.id})
     api("PUT", f"/consultations/{visit['id']}", doctor, consultation)
@@ -141,7 +116,6 @@ def record_visit(api: Api, code: str, patient: Patient, doctor: str, approver: s
 
 
 def validate_all(record_ids: list[int], workers: int) -> None:
-    """HL7-validate the FHIR records (the same check as the Validate button), several validator processes at once."""
     with SessionLocal() as db:
         bundles = {r.id: r.bundle for r in db.scalars(select(FhirRecord).where(FhirRecord.id.in_(record_ids)))}
     print(f"Validating {len(bundles)} FHIR document(s) with the HL7 validator ({workers} at a time; about a minute each)...")
@@ -167,7 +141,7 @@ TEAM_BY_HOSPITAL_ID: dict[int, dict] = {}
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(description="Give the demo hospitals records to exchange through the simulated ABDM.")
     parser.add_argument("--workers", type=int, default=3, help="validator processes in parallel (default 3)")
     args = parser.parse_args()
     if not validator_available():
@@ -183,7 +157,6 @@ def main() -> None:
         TEAM_BY_HOSPITAL_ID.update({h.id: TEAM[code] for code, h in hospitals.items()})
         hospital_ids = {code: h.id for code, h in hospitals.items()}
 
-        # 1. visits and FHIR documents
         new_records = []
         for code, address, doctor, approver, consultation, medicines, lab in VISITS:
             hospital = hospitals[code]
@@ -217,7 +190,6 @@ def main() -> None:
     if pending:
         validate_all(pending, max(1, args.workers))
 
-    # 2. ABHA verification and care context linking, at every hospital (through simulated ABDM)
     print("Verifying ABHA addresses with ABDM (simulated) and linking validated records:")
     with SessionLocal() as db:
         for code, hospital_id in hospital_ids.items():

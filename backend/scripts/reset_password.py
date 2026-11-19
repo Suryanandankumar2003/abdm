@@ -1,23 +1,17 @@
-"""Set a new password for a user (e.g. a forgotten admin password) and sign them out everywhere.
-
-Usage, from the project folder or from backend/:  python backend\\scripts\\reset_password.py admin
-The password is asked for without being shown; it is never passed on the command line.
-"""
-
 import getpass
 import os
 import sys
 from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parent.parent
-os.chdir(BACKEND)  # relative paths in .env (e.g. UPLOAD_DIR=./uploads) are relative to backend/
+os.chdir(BACKEND)
 sys.path.insert(0, str(BACKEND))
 
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import select
 
-from app.database import SessionLocal  # noqa: E402
-from app.models import User  # noqa: E402
-from app.security import hash_password  # noqa: E402
+from app.database import SessionLocal
+from app.models import User
+from app.security import hash_password
 
 
 def main() -> None:
@@ -32,7 +26,7 @@ def main() -> None:
         if getpass.getpass("Type it again: ") != password:
             sys.exit("Password not changed: the two entries differ")
         user.password_hash = hash_password(password)
-        user.token_version += 1  # signs out existing sessions
+        user.token_version += 1
         db.commit()
     print(f"Password changed for {username} ({user.full_name}). Sign in with the new password.")
 

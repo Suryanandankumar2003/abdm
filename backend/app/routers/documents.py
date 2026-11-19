@@ -1,5 +1,3 @@
-"""Clinical document upload, AI extraction, human review and professional approval."""
-
 import logging
 import re
 from pathlib import Path
@@ -24,17 +22,14 @@ from app.services import (audit, commit, current_doctor, get_or_404, mark_approv
 router = APIRouter(tags=["documents"])
 log = logging.getLogger(__name__)
 
-FILE_TYPES = {  # extension -> (content type, leading bytes)
+FILE_TYPES = {
     ".pdf": ("application/pdf", b"%PDF"), ".png": ("image/png", b"\x89PNG"), ".jpg": ("image/jpeg", b"\xff\xd8"),
     ".jpeg": ("image/jpeg", b"\xff\xd8"), ".gif": ("image/gif", b"GIF8"), ".webp": ("image/webp", b"RIFF"),
     ".docx": (DOCX_TYPE, b"PK"), ".txt": ("text/plain", b""),
 }
 
 
-# ---------- extraction ----------
-
 def run_extraction(document_id: int, user_id: int) -> None:
-    """Background task: call the AI model and store the reviewable record (or a blank one on failure)."""
     with SessionLocal() as db:
         doc = db.get(ClinicalDocument, document_id)
         try:
@@ -42,7 +37,7 @@ def run_extraction(document_id: int, user_id: int) -> None:
             doc.ai_output = doc.data = record.model_dump(mode="json")
             doc.document_type, doc.extraction_status, doc.extraction_error = record.document_type, "completed", None
             doc.ai_model = settings.ai_model
-        except Exception as exc:  # any failure leaves the document usable for manual entry
+        except Exception as exc:
             if not isinstance(exc, ExtractionError):
                 log.exception("Unexpected extraction failure for document %s", document_id)
             doc.extraction_status, doc.extraction_error = "failed", str(exc)[:500]
@@ -52,10 +47,7 @@ def run_extraction(document_id: int, user_id: int) -> None:
         db.commit()
 
 
-# ---------- review state ----------
-
 def requirements(doc: ClinicalDocument, record: ReviewedRecord | None) -> list[str]:
-    """Everything that must be completed before the document can be submitted for approval."""
     needs = []
     if doc.patient_id is None:
         needs.append("Link the document to a registered patient")
@@ -88,7 +80,6 @@ def requirements(doc: ClinicalDocument, record: ReviewedRecord | None) -> list[s
 
 
 def patient_warnings(doc: ClinicalDocument, record: ReviewedRecord | None) -> list[str]:
-    """Differences between the document's patient details and the linked registered patient."""
     if not (record and doc.patient):
         return []
     warnings, p = [], record.patient
@@ -120,7 +111,6 @@ def document_out(db: Session, doc: ClinicalDocument) -> dict:
 
 
 def apply_provenance(doc: ClinicalDocument, record: ReviewedRecord) -> ReviewedRecord:
-    """Server-side truth for 'AI vs manual': a value that differs from the AI output is manual."""
     original = dict(iter_fields(ReviewedRecord.model_validate(doc.ai_output))) if doc.ai_output else {}
     for path, f in iter_fields(record):
         ai = original.get(path)
@@ -130,8 +120,6 @@ def apply_provenance(doc: ClinicalDocument, record: ReviewedRecord) -> ReviewedR
             f.review = "edited"
     return refresh_status(record)
 
-
-# ---------- endpoints ----------
 
 @router.get("/documents", response_model=Page[DocumentSummary])
 def list_documents(status: str | None = None, patient_id: int | None = None,
@@ -173,7 +161,7 @@ def upload_document(background: BackgroundTasks, request: Request, file: UploadF
                            created_by_id=user.id, status="draft")
     db.add(doc)
     db.flush()
-    audit(db, user, "document.upload", "document", doc.id, {"type": suffix, "size": len(data)}, request)  # names can identify
+    audit(db, user, "document.upload", "document", doc.id, {"type": suffix, "size": len(data)}, request)
     db.commit()
     background.add_task(run_extraction, doc.id, user.id)
     return document_out(db, doc)
@@ -246,7 +234,6 @@ def submit_document(document_id: int, request: Request, user: User = Depends(req
 @router.post("/documents/{document_id}/approve", response_model=DocumentOut)
 def approve_document(document_id: int, request: Request, user: User = Depends(require("document:approve")),
                      db: Session = Depends(get_db)):
-    """A doctor approves the reviewed record; the FHIR Bundle is generated immediately."""
     doc = get_or_404(db, ClinicalDocument, document_id, user.hospital_id)
     require_status(doc, "pending_approval", action="approve document")
     doctor = current_doctor(db, user)

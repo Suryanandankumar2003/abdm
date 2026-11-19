@@ -1,11 +1,3 @@
-"""Create a network administrator: the one account that manages every hospital (profiles, ABDM IDs, activation and
-each hospital's staff accounts). It belongs to no hospital and cannot see patient or clinical data.
-
-Usage, from the project folder or from backend/:  python backend\\scripts\\create_network_admin.py [username]
-(default username: superadmin). The password is asked for without being shown. Run init_db.py first.
-To change the password later: python backend\\scripts\\reset_password.py superadmin
-"""
-
 import getpass
 import os
 import re
@@ -13,16 +5,16 @@ import sys
 from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parent.parent
-os.chdir(BACKEND)  # relative paths in .env (e.g. UPLOAD_DIR=./uploads) are relative to backend/
+os.chdir(BACKEND)
 sys.path.insert(0, str(BACKEND))
 
-from pydantic import TypeAdapter, ValidationError  # noqa: E402
-from sqlalchemy import inspect, select  # noqa: E402
+from pydantic import TypeAdapter, ValidationError
+from sqlalchemy import inspect, select
 
-from app.database import SessionLocal  # noqa: E402
-from app.models import Role, User  # noqa: E402
-from app.schemas import Password  # noqa: E402
-from app.security import NETWORK_ADMIN, ROLES, hash_password  # noqa: E402
+from app.database import SessionLocal
+from app.models import Role, User
+from app.schemas import Password
+from app.security import NETWORK_ADMIN, ROLES, hash_password
 
 
 def main() -> None:

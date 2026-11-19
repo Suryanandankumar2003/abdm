@@ -1,8 +1,3 @@
-"""HIU staff API (/api/hiu/...): consent requests, their artefacts and the retrieved records (clinical data needs
-hiu:records and every view is audited). Also the simulated consent manager: the patient grants, denies or revokes
-consent in their ABHA app, and the records come from other hospitals on this server (or, when there is only one
-hospital, from a synthetic outside clinic)."""
-
 import hashlib
 import json
 import uuid
@@ -22,7 +17,10 @@ from app.security import require
 from app.services import audit, current_doctor, get_or_404, paginate
 
 router = APIRouter(prefix="/hiu", tags=["hiu"])
-iso = lambda value: value.isoformat(timespec="seconds") + "Z"  # noqa: E731  (ABDM date-times)
+
+
+def iso(value: datetime) -> str:
+    return value.isoformat(timespec="seconds") + "Z"
 
 
 class RequestOut(ORMModel):
@@ -55,12 +53,12 @@ class RecordOut(ORMModel):
 
 class RequestIn(BaseModel):
     patient_id: int
-    requester_doctor_id: int | None = None  # default: the signed-in doctor
+    requester_doctor_id: int | None = None
     purpose_code: str
     hi_types: list[str]
     date_from: date
     date_to: date
-    erase_at: date | None = None  # default: in 30 days
+    erase_at: date | None = None
     reason: str | None = Field(None, max_length=500)
 
 
@@ -76,11 +74,13 @@ def dashboard(user: User = Depends(require("hiu:read")), db: Session = Depends(g
 
 @router.post("/requests", response_model=RequestOut, status_code=201)
 def create_request(body: RequestIn, user: User = Depends(require("hiu:request")), db: Session = Depends(get_db)):
-    """Staff submit the request; the patient then decides on consent in their ABHA app."""
     patient = get_or_404(db, Patient, body.patient_id, user.hospital_id)
     doctor = get_or_404(db, Doctor, body.requester_doctor_id, user.hospital_id) if body.requester_doctor_id \
         else current_doctor(db, user)
-    end_of = lambda day: datetime.combine(day, time.max.replace(microsecond=0))  # noqa: E731
+
+    def end_of(day: date) -> datetime:
+        return datetime.combine(day, time.max.replace(microsecond=0))
+
     try:
         request = hiu.create_consent_request(db, user, patient, doctor, body.purpose_code, body.hi_types,
                                              datetime.combine(body.date_from, time.min), end_of(body.date_to),
@@ -117,7 +117,7 @@ def get_request(request_id: int, user: User = Depends(require("hiu:read")), db: 
 def patient_records(patient_id: int, request: Request, user: User = Depends(require("hiu:records")),
                     db: Session = Depends(get_db)):
     patient = get_or_404(db, Patient, patient_id, user.hospital_id)
-    hiu.enforce_retention(db)  # expired or revoked external data is never shown
+    hiu.enforce_retention(db)
     rows = db.scalars(select(RetrievedRecord).where(RetrievedRecord.hospital_id == user.hospital_id,
                                                     RetrievedRecord.patient_id == patient.id)
                       .order_by(RetrievedRecord.record_date.desc())).all()
@@ -141,18 +141,13 @@ def get_record(record_id: int, request: Request, user: User = Depends(require("h
 
 @router.post("/records/{record_id}/validate", response_model=RecordOut)
 def validate_record(record_id: int, user: User = Depends(require("hiu:records")), db: Session = Depends(get_db)):
-    """Run the HL7 FHIR validator on a received record (takes about a minute)."""
     row = get_or_404(db, RetrievedRecord, record_id, user.hospital_id)
     hiu.validate_record(row.id)
     db.refresh(row)
     return row
 
 
-# ---------- simulated consent manager: the patient's decision in their ABHA app ----------
-
 def sources(db: Session, request: HiuConsentRequest, hi_types: list[str]) -> list[tuple[Hospital | None, list[dict]]]:
-    """Care contexts that other hospitals here linked to the patient's ABHA address, within the requested types and
-    dates: [(HIP hospital, careContexts)]. A server with one hospital uses the synthetic clinic (hospital None)."""
     if db.scalar(select(func.count(Hospital.id))) < 2:
         return [(None, [{"patientReference": "SUN-000777", "careContextReference": f"SUN-CC-{i}"} for i in range(1, 6)])]
     found: dict[int, list[dict]] = {}
@@ -166,18 +161,18 @@ def sources(db: Session, request: HiuConsentRequest, hi_types: list[str]) -> lis
 
 
 def synthetic_clinic(patient: Patient, detail: dict, keys: dict) -> dict:
-    """'Sunrise Clinic (SIMULATED)' answers like a HIP: SYNTHETIC records, only the consented types inside the consent's
-    dates, encrypted for the HIU's keys."""
     clinic = Hospital(id=900, name="Sunrise Clinic (SIMULATED)", code="SUN", city="Pune", state="Maharashtra")
     doctor = Doctor(id=901, full_name="Dr. Kavya Menon (simulated)", registration_number="SIM-55555", qualification="MBBS, MD")
     external = Patient(id=902, patient_code="SUN-000777", full_name=patient.full_name, gender=patient.gender,
                        date_of_birth=patient.date_of_birth, year_of_birth=patient.year_of_birth, mobile=patient.mobile)
     hba1c = {"system": LOINC, "code": "4548-4", "display": "Hemoglobin A1c/Hemoglobin.total in Blood"}
-    lab = lambda key, when, value, conclusion: ClinicalContent(  # noqa: E731
-        record_type="DiagnosticReportRecord", key=key, title="HbA1c (synthetic)", date=when, reports=[
+
+    def lab(key: str, when: datetime, value: float, conclusion: str) -> ClinicalContent:
+        return ClinicalContent(record_type="DiagnosticReportRecord", key=key, title="HbA1c (synthetic)", date=when, reports=[
             {"name": "HbA1c", "conclusion": conclusion, "issued": when, "interpreter": 901, "results": [
                 {"name": "HbA1c", "loinc": hba1c, "value": str(value), "value_num": value, "unit": "%", "ref_high": 5.7,
                  "interpretation": "H"}]}])
+
     records = {
         "SUN-CC-1": ("OPConsultation", ClinicalContent(
             record_type="OPConsultRecord", key="sim-op-1", title="OP consultation (synthetic)", date=datetime(2025, 6, 10, 10),
@@ -208,15 +203,13 @@ def synthetic_clinic(patient: Patient, detail: dict, keys: dict) -> dict:
 
 class Decision(BaseModel):
     grant: bool
-    hi_types: list[str] | None = None  # a grant may narrow the requested record types
+    hi_types: list[str] | None = None
     reason: str | None = None
 
 
 @router.post("/simulate/requests/{request_id}/decide", response_model=RequestOut)
 def simulate_decision(request_id: int, body: Decision, user: User = Depends(require("hiu:request")),
                       db: Session = Depends(get_db)):
-    """The patient grants or denies the request. A grant gives one consent artefact per provider holding matching
-    records; each provider (HIP) checks it, and the records are then requested, decrypted and stored."""
     request = get_or_404(db, HiuConsentRequest, request_id, user.hospital_id)
     if request.status != "pending_consent":
         raise HTTPException(409, "The request is not waiting for consent")
@@ -234,7 +227,7 @@ def simulate_decision(request_id: int, body: Decision, user: User = Depends(requ
                   "hiu": {"id": hip.hiu_id(request.hospital)}, "patient": {"id": request.abha_address}, "hiTypes": hi_types,
                   "purpose": {"code": request.purpose_code, "text": hiu.PURPOSES[request.purpose_code]}, "careContexts": contexts,
                   "permission": {"accessMode": "VIEW", "dateRange": dates, "dataEraseAt": iso(request.data_erase_at)}}
-        if hospital:  # the HIP learns of the consent before it is asked for data
+        if hospital:
             hip.consent_notify(db, hospital, detail["consentId"], "GRANTED", detail)
         artefact = hiu.accept_artefact(db, request, detail, hospital.name if hospital else "Sunrise Clinic (SIMULATED)")
         db.flush()
@@ -253,14 +246,13 @@ def simulate_decision(request_id: int, body: Decision, user: User = Depends(requ
 
 @router.post("/simulate/requests/{request_id}/revoke", response_model=RequestOut)
 def simulate_revoke(request_id: int, user: User = Depends(require("hiu:request")), db: Session = Depends(get_db)):
-    """The patient revokes the consent: the providers stop sharing at once and the received copies are erased."""
     request = get_or_404(db, HiuConsentRequest, request_id, user.hospital_id)
     for artefact in request.artefacts:
         if provider := db.scalar(select(Hospital).where(Hospital.abdm_hip_id == artefact.hip_id)):
             hip.consent_notify(db, provider, artefact.artefact_id, "REVOKED")
         artefact.status, artefact.status_message = "revoked", "Consent revoked by the patient"
         for row in db.scalars(select(RetrievedRecord).where(RetrievedRecord.consent_artefact_id == artefact.artefact_id)):
-            db.delete(row)  # data may not be used once consent ends
+            db.delete(row)
     request.status, request.status_message = "revoked", "Consent revoked by the patient; received records erased"
     db.commit()
     return request

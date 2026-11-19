@@ -1,6 +1,3 @@
-"""Shared calls to Mistral AI: structured output (AI_MODEL) and OCR (AI_OCR_MODEL).
-AI only suggests or summarises; it never decides."""
-
 import base64
 from contextlib import contextmanager
 
@@ -12,7 +9,7 @@ from app.config import settings
 
 
 class AIError(Exception):
-    """AI call failed; message is safe to show to staff."""
+    pass
 
 
 def client() -> Mistral:
@@ -30,7 +27,7 @@ def provider_errors():
             raise AIError("AI provider credentials are invalid (check MISTRAL_API_KEY)") from exc
         if exc.status_code == 429:
             raise AIError("AI provider rate limit reached; try again shortly") from exc
-        raise AIError(f"AI provider error {exc.status_code}") from exc  # body may echo request content; not shown
+        raise AIError(f"AI provider error {exc.status_code}") from exc
     except (httpx.RequestError, errors.NoResponseError) as exc:
         raise AIError("Could not reach the AI provider") from exc
 
@@ -52,7 +49,6 @@ def structured(system: str, content: list[dict], output_format: type[BaseModel],
 
 
 def ocr(data: bytes, content_type: str) -> str:
-    """Text of a PDF or image (page by page, as markdown) read by Mistral OCR."""
     uri = f"data:{content_type};base64,{base64.standard_b64encode(data).decode()}"
     document = ({"type": "document_url", "document_url": uri} if content_type == "application/pdf"
                 else {"type": "image_url", "image_url": uri})

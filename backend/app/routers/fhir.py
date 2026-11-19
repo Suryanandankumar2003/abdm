@@ -1,7 +1,3 @@
-"""FHIR records: approved consultations, prescriptions, lab reports and reviewed documents become ClinicalContent, are
-built into ABDM document Bundles (app.fhir), checked, stored, validated with the HL7 validator and downloaded.
-Conversions are conservative: what cannot be read unambiguously stays as text and is reported as a warning."""
-
 import base64
 import json
 import re
@@ -35,7 +31,7 @@ DOCUMENT_TYPES = {"prescription": "PrescriptionRecord", "lab_report": "Diagnosti
 FLAGS = {"H": "H", "HIGH": "H", "↑": "H", "L": "L", "LOW": "L", "↓": "L", "*": "A", "A": "A", "ABNORMAL": "A", "N": "N", "NORMAL": "N"}
 ROUTE_WORDS = {"po": "oral", "by mouth": "oral", "intravenous": "iv", "intramuscular": "im", "s/c": "sc", "subcutaneous": "sc",
                "local application": "topical", "sl": "sublingual", "inhaled": "inhalation", "eye": "ophthalmic",
-               "ear": "otic", "pr": "rectal"}  # plus the route keys themselves (oral, iv, im, ...)
+               "ear": "otic", "pr": "rectal"}
 FREQUENCY_WORDS = {**{k.lower(): k for k in fhir.FREQUENCIES}, **{v[0].lower(): k for k, v in fhir.FREQUENCIES.items()},
                    "once a day": "OD", "1-0-0": "OD", "0-0-1": "HS", "bid": "BD", "twice a day": "BD", "1-0-1": "BD",
                    "tid": "TDS", "thrice daily": "TDS", "three times a day": "TDS", "1-1-1": "TDS", "four times a day": "QID",
@@ -44,18 +40,16 @@ FREQUENCY_WORDS = {**{k.lower(): k for k in fhir.FREQUENCIES}, **{v[0].lower(): 
 
 @lru_cache(maxsize=2000)
 def terminology_display(system: str, code: str) -> str | None:
-    """Official display of a code from the terminology server (FHIR $lookup); None if unknown or unreachable."""
     url = f"{settings.fhir_tx_server}/r4/CodeSystem/$lookup?" + urllib.parse.urlencode({"system": system, "code": code})
     try:
         with urllib.request.urlopen(urllib.request.Request(url, headers={"Accept": "application/fhir+json"}), timeout=20) as r:
             parameters = json.load(r).get("parameter", [])
-    except (OSError, ValueError):  # unreachable, or FHIR_TX_SERVER=n/a
+    except (OSError, ValueError):
         return None
     return next((p.get("valueString") for p in parameters if p.get("name") == "display"), None)
 
 
 def condition(text: str, code: str | None, warnings: list[str], **fields) -> dict:
-    """A diagnosis; ICD-10 coded only with the official title from the terminology server, else text only."""
     display = terminology_display(ICD10, code) if code else None
     if code and display is None:
         warnings.append(f"{text}: ICD-10 code {code} could not be verified on the terminology server, "
@@ -63,15 +57,12 @@ def condition(text: str, code: str | None, warnings: list[str], **fields) -> dic
     return {"text": text, "icd10": (code, display) if display else None, **fields}
 
 
-# ---------- approved records -> ClinicalContent (returns content, patient, author, other doctors, warnings) ----------
-
 def medication(i) -> dict:
     return {"name": i.medicine_name, "dosage": i.dosage, "route": i.route, "frequency": i.frequency,
             "duration_days": i.duration_days, "quantity": i.quantity, "instructions": i.instructions}
 
 
 def consultation_source(e: Encounter, prescriptions: list[Prescription], orders: list[LabOrder]):
-    # Only the consulting doctor's prescriptions/orders belong to this note; others export on their own.
     warnings = []
     follow_up = " ".join(filter(None, [e.follow_up_instructions,
                                        f"Review on {e.follow_up_date.isoformat()}." if e.follow_up_date else None]))
@@ -86,7 +77,7 @@ def consultation_source(e: Encounter, prescriptions: list[Prescription], orders:
         orders=[{"name": o.test.name, "status": "completed" if o.status == "completed" else "active", "priority": o.priority,
                  "authored": o.created_at, "note": o.clinical_notes} for o in orders if o.doctor_id == e.doctor_id],
         text={"chief_complaint": e.chief_complaint, "history": e.history_present_illness, "findings": e.clinical_findings,
-              "plan": e.treatment_plan, "follow_up": follow_up})  # doctor_notes are internal and never exported
+              "plan": e.treatment_plan, "follow_up": follow_up})
     return content, e.patient, e.doctor, [], warnings
 
 
@@ -120,10 +111,8 @@ def number(text: str | None) -> float | None:
 
 
 def document_source(doc: ClinicalDocument):
-    """A reviewed, approved document. Its own file is always attached; reviewed fields become structured entries."""
     record, warnings = ReviewedRecord.model_validate(doc.data), []
     kind, enc = DOCUMENT_TYPES.get(doc.document_type, "HealthDocumentRecord"), record.encounter
-    v = value  # the reviewed value of a field, or None
 
     def day(label: str, raw: str | None) -> datetime | None:
         try:
@@ -131,61 +120,75 @@ def document_source(doc: ClinicalDocument):
         except ValueError:
             warnings.append(f"{label} '{raw}' is not in YYYY-MM-DD format, so it was not used")
 
-    visit = day("Visit/document date", v(enc.visit_date) or v(record.document_date))
-    admitted, discharged = day("Admission date", v(enc.admission_date)), day("Discharge date", v(enc.discharge_date))
-    encounter = ({"start": admitted, "end": discharged, "inpatient": True} if kind == "DischargeSummaryRecord" and admitted
-                 else {"start": visit, "reason": v(enc.chief_complaint)} if kind == "OPConsultRecord" and visit else None)
+    visit = day("Visit/document date", value(enc.visit_date) or value(record.document_date))
+    admitted = day("Admission date", value(enc.admission_date))
+    discharged = day("Discharge date", value(enc.discharge_date))
+    encounter = None
+    if kind == "DischargeSummaryRecord" and admitted:
+        encounter = {"start": admitted, "end": discharged, "inpatient": True}
+    elif kind == "OPConsultRecord" and visit:
+        encounter = {"start": visit, "reason": value(enc.chief_complaint)}
 
     medications = []
     for m in record.medications:
-        if not v(m.name):
+        if not value(m.name):
             continue
-        duration, quantity, route = v(m.duration), number(v(m.quantity)), " ".join((v(m.route) or "").lower().split())
+        duration, quantity = value(m.duration), number(value(m.quantity))
+        route = " ".join((value(m.route) or "").lower().split())
+        route = ROUTE_WORDS.get(route, route)
         weeks = re.fullmatch(r"\s*(?:x\s*)?(\d+)\s*(d|days?|w|wks?|weeks?)\s*", duration or "", re.I)
         days = int(weeks[1]) * (7 if weeks[2].lower().startswith("w") else 1) if weeks else None
-        route = ROUTE_WORDS.get(route, route)
-        medications.append({"name": v(m.name), "dosage": v(m.dosage), "route": route if route in fhir.ROUTES else None,
-                            "frequency": FREQUENCY_WORDS.get(" ".join((v(m.frequency) or "").lower().split())),
-                            "frequency_text": v(m.frequency), "duration_days": days, "duration_text": None if days else duration,
-                            "quantity": int(quantity) if quantity and quantity.is_integer() else None,
-                            "instructions": v(m.instructions)})
+        medications.append({
+            "name": value(m.name), "dosage": value(m.dosage), "route": route if route in fhir.ROUTES else None,
+            "frequency": FREQUENCY_WORDS.get(" ".join((value(m.frequency) or "").lower().split())),
+            "frequency_text": value(m.frequency), "duration_days": days, "duration_text": None if days else duration,
+            "quantity": int(quantity) if quantity and quantity.is_integer() else None,
+            "instructions": value(m.instructions)})
 
     results = []
     for r in record.lab_results:
-        if v(r.test_name) and v(r.value) is not None:
-            limits = re.fullmatch(r"\s*([\d.]+)\s*(?:-|–|to)\s*([\d.]+)\s*\S*\s*", v(r.reference_range) or "")
-            results.append({"name": v(r.test_name), "value": v(r.value), "value_num": number(v(r.value)), "unit": v(r.unit),
-                            "ref_low": float(limits[1]) if limits else None, "ref_high": float(limits[2]) if limits else None,
-                            "ref_text": None if limits else v(r.reference_range),
-                            "interpretation": FLAGS.get((v(r.flag) or "").strip().upper())})
-    panels = {v(r.panel_name) for r in record.lab_results if v(r.panel_name)}
+        if value(r.test_name) and value(r.value) is not None:
+            limits = re.fullmatch(r"\s*([\d.]+)\s*(?:-|–|to)\s*([\d.]+)\s*\S*\s*", value(r.reference_range) or "")
+            results.append({
+                "name": value(r.test_name), "value": value(r.value), "value_num": number(value(r.value)),
+                "unit": value(r.unit), "ref_low": float(limits[1]) if limits else None,
+                "ref_high": float(limits[2]) if limits else None, "ref_text": None if limits else value(r.reference_range),
+                "interpretation": FLAGS.get((value(r.flag) or "").strip().upper())})
+    panels = {value(r.panel_name) for r in record.lab_results if value(r.panel_name)}
     reports = [{"name": panels.pop() if len(panels) == 1 else "Laboratory report", "results": results,
-                "conclusion": v(record.report_conclusion), "issued": doc.approved_at, "effective": visit,
+                "conclusion": value(record.report_conclusion), "issued": doc.approved_at, "effective": visit,
                 "interpreter": doc.approved_by_doctor_id}] if results else []
 
-    partial_date = lambda d: d.strip() if d and re.fullmatch(r"\s*\d{4}(-\d{2}(-\d{2})?)?\s*", d) else None  # noqa: E731
-    immunizations = [{"vaccine": v(im.vaccine), "occurrence": partial_date(v(im.date)), "lot_number": v(im.lot_number),
-                      "dose_number": int(n) if (n := number(v(im.dose_number))) and n.is_integer() else None}
-                     for im in record.immunizations if v(im.vaccine)]  # a missing or unusable date is reported by prechecks
+    def partial_date(text: str | None) -> str | None:
+        return text.strip() if text and re.fullmatch(r"\s*\d{4}(-\d{2}(-\d{2})?)?\s*", text) else None
+
+    immunizations = []
+    for im in record.immunizations:
+        if value(im.vaccine):
+            dose = number(value(im.dose_number))
+            immunizations.append({"vaccine": value(im.vaccine), "occurrence": partial_date(value(im.date)),
+                                  "lot_number": value(im.lot_number),
+                                  "dose_number": int(dose) if dose and dose.is_integer() else None})
 
     data = (settings.upload_dir / doc.storage_name).read_bytes()
     content = ClinicalContent(
         record_type=kind, key=f"document-{doc.id}", title=doc.file_name, date=doc.approved_at, encounter=encounter,
-        conditions=[condition(v(d.text), (v(d.icd10_code) or "").strip().upper() or None, warnings)
-                    for d in record.diagnoses if v(d.text)],
-        allergies=[{"text": v(a.substance), "reaction": v(a.reaction)} for a in record.allergies if v(a.substance)],
-        observations=[{"name": v(x.name), "value": number(v(x.value)), "value_text": v(x.value), "unit": v(x.unit)}
-                      for x in record.vitals if v(x.name) and v(x.value)],
+        conditions=[condition(value(d.text), (value(d.icd10_code) or "").strip().upper() or None, warnings)
+                    for d in record.diagnoses if value(d.text)],
+        allergies=[{"text": value(a.substance), "reaction": value(a.reaction)}
+                   for a in record.allergies if value(a.substance)],
+        observations=[{"name": value(x.name), "value": number(value(x.value)), "value_text": value(x.value),
+                       "unit": value(x.unit)} for x in record.vitals if value(x.name) and value(x.value)],
         medications=medications, reports=reports, immunizations=immunizations,
-        text={"chief_complaint": v(enc.chief_complaint), "history": v(enc.history_of_present_illness),
-              "findings": v(enc.examination_findings), "plan": v(enc.treatment_plan), "follow_up": v(enc.follow_up),
-              "hospital_course": v(enc.hospital_course),
-              "notes": "\n".join(filter(None, [v(enc.instructions), v(record.notes)])) or None},
+        text={"chief_complaint": value(enc.chief_complaint), "history": value(enc.history_of_present_illness),
+              "findings": value(enc.examination_findings), "plan": value(enc.treatment_plan),
+              "follow_up": value(enc.follow_up), "hospital_course": value(enc.hospital_course),
+              "notes": "\n".join(filter(None, [value(enc.instructions), value(record.notes)])) or None},
         attachment={"content_type": doc.content_type, "data": base64.b64encode(data).decode(), "title": doc.file_name})
-    return content, doc.patient, doc.author_doctor, [doc.approved_by_doctor] if doc.approved_by_doctor else [], warnings
+    doctors = [doc.approved_by_doctor] if doc.approved_by_doctor else []
+    return content, doc.patient, doc.author_doctor, doctors, warnings
 
 
-# Checking. Elements the ABDM profiles require that depend on the source data rather than on the engine.
 REQUIRED = {"DiagnosticReport": [("result", "at least one result"), ("conclusion", "a conclusion"),
                                  ("resultsInterpreter", "an approving doctor (results interpreter)")],
             "MedicationRequest": [("dosageInstruction", "dosage instructions"), ("requester", "a prescriber")],
@@ -198,14 +201,12 @@ def issue(severity: str, category: str, message: str, location: str | None = Non
 
 
 def describe(entry: dict) -> str:
-    """Readable name of a bundle entry, e.g. 'Observation (Haemoglobin)'."""
     r = entry.get("resource", {})
     label = (r.get("code") or r.get("medicationCodeableConcept") or r.get("vaccineCode") or {}).get("text") or r.get("title")
     return f"{r.get('resourceType', '?')} ({label})" if isinstance(label, str) else r.get("resourceType", "?")
 
 
 def prechecks(bundle: dict, warnings: list[str] = ()) -> list[dict]:
-    """Fast local checks of structure, references and required data: useful feedback, not profile validation."""
     issues, entries = [issue("warning", "data", w) for w in warnings], bundle.get("entry", [])
     if bundle.get("type") != "document" or not entries or entries[0]["resource"].get("resourceType") != "Composition":
         return issues + [issue("error", "structure", "A document Bundle must be of type 'document' and start with its Composition")]
@@ -224,10 +225,9 @@ def validator_available() -> bool:
 
 
 def validate(bundle: dict) -> tuple[str, list[dict], str]:
-    """The HL7 validator with FHIR 4.0.1, the ABDM IG and terminology checks: (valid|invalid|error, issues, validator)."""
     if not validator_available():
         return "error", [issue("error", "validator", "HL7 FHIR validator is not installed (run scripts\\setup_validator.ps1)")], ""
-    tools = settings.fhir_validator_jar.parent  # bundled JDK (tools/jdk-*), else JAVA_PATH, else `java` on PATH
+    tools = settings.fhir_validator_jar.parent
     java = settings.java_path or next(iter([*tools.glob("jdk-*/bin/java.exe"), *tools.glob("jdk-*/bin/java")]), "java")
     with tempfile.TemporaryDirectory() as tmp:
         source, output = Path(tmp) / "bundle.json", Path(tmp) / "outcome.json"
@@ -245,7 +245,7 @@ def validate(bundle: dict) -> tuple[str, list[dict], str]:
     entries, issues = bundle.get("entry", []), []
     for i in outcome.get("issue", []):
         where = (i.get("expression") or i.get("location") or [None])[0]
-        n = re.match(r"Bundle\.entry\[(\d+)\]", where or "")  # e.g. "Observation (Hb): Bundle.entry[3].code"
+        n = re.match(r"Bundle\.entry\[(\d+)\]", where or "")
         place = f"{describe(entries[int(n[1])])}: {where}" if n and int(n[1]) < len(entries) else where
         severity = "error" if i["severity"] in ("error", "fatal") else i["severity"]
         issues.append(issue(severity, "hl7", (i.get("details") or {}).get("text") or i.get("diagnostics") or "", place))
@@ -254,7 +254,6 @@ def validate(bundle: dict) -> tuple[str, list[dict], str]:
 
 
 def load_source(db: Session, user: User, source_type: str, source_id: int):
-    """Load an approved record of this hospital and convert it to engine input."""
     model = {"consultation": Encounter, "prescription": Prescription, "lab_order": LabOrder}.get(source_type, ClinicalDocument)
     item = get_or_404(db, model, source_id, user.hospital_id)
     approved = (item.report is not None and item.report.status == "approved") if source_type == "lab_order" \
@@ -270,7 +269,6 @@ def load_source(db: Session, user: User, source_type: str, source_id: int):
 
 
 def store_record(db: Session, user: User, source_type: str, source_id: int, request: Request | None = None) -> FhirRecord:
-    """Generate (or regenerate, as a new version) and save the Bundle; any earlier validation no longer applies."""
     content, patient, author, doctors, warnings = load_source(db, user, source_type, source_id)
     if author is None:
         raise HTTPException(422, "The record has no responsible doctor, so it cannot be authored in FHIR")
@@ -303,7 +301,6 @@ def list_records(patient_id: int | None = None, validation_status: str | None = 
 @router.post("/records", response_model=FhirRecordOut, status_code=201)
 def generate_record(body: FhirGenerate, request: Request, user: User = Depends(require("fhir:generate")),
                     db: Session = Depends(get_db)):
-    """Generate the FHIR record of an approved source; generating again creates the next version."""
     record = store_record(db, user, body.source_type, body.source_id, request)
     db.commit()
     return record
@@ -317,7 +314,6 @@ def get_record(record_id: int, user: User = Depends(require("fhir:read")), db: S
 @router.post("/records/{record_id}/validate", response_model=FhirRecordOut)
 def validate_record(record_id: int, request: Request, user: User = Depends(require("fhir:generate")),
                     db: Session = Depends(get_db)):
-    """Run the official HL7 validator (takes about a minute). Only valid records can be shared through ABDM."""
     record = get_or_404(db, FhirRecord, record_id, user.hospital_id)
     record.validation_status, record.validation_issues, record.validator = validate(record.bundle)
     record.validated_at = utcnow()

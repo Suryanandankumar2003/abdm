@@ -1,6 +1,3 @@
-"""HIP staff API (/api/hip/...): status, the hospital directory, patients' ABHA verification and care contexts and
-consents, plus simulation tools that play the patient's ABHA app and an outside HIU."""
-
 import hashlib
 import json
 import uuid
@@ -43,7 +40,7 @@ class ConsentOut(ORMModel):
     patient: PatientSummary | None
     abha_address: str | None
     hiu_id: str | None
-    hiu_name: str | None = None  # the requesting hospital, when it is on this server
+    hiu_name: str | None = None
     purpose: str | None
     hi_types: list
     care_contexts: list
@@ -59,7 +56,6 @@ def consents_out(db: Session, rows) -> list[dict]:
 
 
 def run(action):
-    """Run a HIP step; a refusal becomes a 422 with the reason."""
     try:
         return action()
     except hip.HipError as exc:
@@ -81,7 +77,6 @@ def hip_status(user: User = Depends(require("hip:read")), db: Session = Depends(
 
 @router.get("/network")
 def network(user: User = Depends(require("hip:read")), db: Session = Depends(get_db)):
-    """The hospitals on this server and their ABDM IDs (a directory: names and IDs only, no patient data)."""
     return {"hospitals": [{"id": h.id, "name": h.name, "code": h.code, "city": h.city, "state": h.state,
                            "hip_id": hip.hip_id(h), "hiu_id": hip.hiu_id(h), "this_hospital": h.id == user.hospital_id}
                           for h in db.scalars(select(Hospital).where(Hospital.is_active.is_(True)).order_by(Hospital.id))]}
@@ -103,7 +98,6 @@ def patient_overview(patient_id: int, user: User = Depends(require("hip:read")),
 
 @router.post("/patients/{patient_id}/link-token")
 def verify_abha(patient_id: int, user: User = Depends(require("hip:manage")), db: Session = Depends(get_db)):
-    """Verify the patient's ABHA address with ABDM; on success ABDM issues the link token used for linking."""
     patient = get_or_404(db, Patient, patient_id, user.hospital_id)
     link = run(lambda: hip.verify_abha(db, user, patient))
     db.commit()
@@ -142,9 +136,6 @@ def list_consents(status: str | None = None, page: int = Query(1, ge=1), page_si
     return {**result, "items": consents_out(db, result["items"])}
 
 
-
-# ---------- simulation tools: the patient's ABHA app and an outside HIU ----------
-
 class SimAbha(BaseModel):
     abha_address: str
     name: str
@@ -155,7 +146,6 @@ class SimAbha(BaseModel):
 
 @router.post("/simulate/abha")
 def simulate_abha(body: SimAbha, _: User = Depends(require("hip:manage"))):
-    """Create an ABHA account in the simulated ABHA registry."""
     hip.registry[body.abha_address.lower()] = {"name": body.name, "gender": body.gender, "yearOfBirth": body.year_of_birth,
                                                "abhaNumber": body.abha_number}
     return {"message": f"Simulated ABHA account {body.abha_address} created"}
@@ -163,18 +153,17 @@ def simulate_abha(body: SimAbha, _: User = Depends(require("hip:manage"))):
 
 class SimConsent(BaseModel):
     patient_id: int
-    care_context_ids: list[int] | None = None  # default: all linked care contexts
-    hi_types: list[str] | None = None  # default: the types of those care contexts
+    care_context_ids: list[int] | None = None
+    hi_types: list[str] | None = None
     date_from: date
     date_to: date
     erase_at: datetime
-    status: str = "GRANTED"  # or REVOKED / EXPIRED / DENIED for an earlier consent_id
+    status: str = "GRANTED"
     consent_id: str | None = None
 
 
 @router.post("/simulate/consent")
 def simulate_consent(body: SimConsent, user: User = Depends(require("hip:manage")), db: Session = Depends(get_db)):
-    """The patient grants (or revokes) an outside HIU access to linked records in their ABHA app."""
     patient = get_or_404(db, Patient, body.patient_id, user.hospital_id)
     contexts = [c for c in db.scalars(select(CareContext).where(CareContext.patient_id == patient.id))
                 if c.link_status == "linked" and (body.care_context_ids is None or c.id in body.care_context_ids)]
@@ -201,7 +190,6 @@ class SimRequest(BaseModel):
 
 @router.post("/simulate/health-information")
 def simulate_health_information(body: SimRequest, user: User = Depends(require("hip:manage")), db: Session = Depends(get_db)):
-    """An outside HIU asks for the records of a consent; this shows what it would receive after decrypting."""
     keys = hip.new_keys()
     reply = hip.share(db, user.hospital, body.consent_id, f"{body.date_from}T00:00:00Z", f"{body.date_to}T23:59:59Z", keys)
     db.commit()

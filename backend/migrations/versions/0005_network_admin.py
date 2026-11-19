@@ -1,12 +1,3 @@
-"""network administrators: users.hospital_id may be empty (a network administrator belongs to no hospital)
-
-Revision ID: 0005
-Revises: 0004
-Create Date: 2026-11-17 18:00:00.000000
-
-SQLite rebuilds the users table for this (batch mode); init_db.migrate() turns foreign key enforcement off for the
-rebuild and checks afterwards that every reference is intact.
-"""
 from typing import Sequence, Union
 
 from alembic import op

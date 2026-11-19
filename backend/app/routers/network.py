@@ -1,11 +1,3 @@
-"""Network administration: every hospital on this platform and their staff accounts.
-
-Only the network administrator (role network_admin, permission network:manage) uses these. A network administrator
-belongs to no hospital and has no patient or clinical access: each hospital's own staff remain the only people who
-see its patients, and records move between hospitals only through ABDM with the patient's consent. Every change is
-written to the audit log of the hospital it concerns, so that hospital's administrator sees it too.
-"""
-
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -33,7 +25,7 @@ def hospital_or_404(db: Session, hospital_id: int) -> Hospital:
 
 def staff_or_404(db: Session, user_id: int) -> User:
     staff = db.get(User, user_id)
-    if staff is None or staff.hospital_id is None:  # network administrators are not managed here
+    if staff is None or staff.hospital_id is None:
         raise HTTPException(404, "Staff member not found")
     return staff
 
@@ -73,8 +65,6 @@ def get_hospital(hospital_id: int, _: User = Depends(network_admin), db: Session
 @router.post("/hospitals", response_model=NetworkHospitalOut, status_code=201)
 def create_hospital(body: NetworkHospitalCreate, request: Request,
                     user: User = Depends(network_admin), db: Session = Depends(get_db)):
-    """Add a hospital, optionally with its administrator account. It gets SIM_HIP_<code> and SIM_HIU_<code> unless
-    other ABDM IDs are given, so it can exchange records with the others right away."""
     data = body.model_dump(exclude={"admin"})
     data["code"] = data["code"].upper()
     if db.scalar(select(Hospital.id).where(func.upper(Hospital.code) == data["code"])):
@@ -105,7 +95,7 @@ def update_hospital(hospital_id: int, body: NetworkHospitalUpdate, request: Requ
     update_hospital_profile(db, hospital, data, user, request)
     if active is not None and active != hospital.is_active:
         hospital.is_active = active
-        if not active:  # everyone signed in there is signed out now
+        if not active:
             for staff in db.scalars(select(User).where(User.hospital_id == hospital.id)):
                 revoke_tokens(staff)
         audit(db, user, "hospital.activate" if active else "hospital.deactivate", "hospital", hospital.id,
